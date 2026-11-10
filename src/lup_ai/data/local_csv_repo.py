@@ -30,6 +30,10 @@ class LocalCsvAnalyticsRepository:
     def backend_name(self) -> str:
         return "local_synthetic_csv"
 
+    def invalidate_cache(self) -> None:
+        """Drop in-memory DataFrame cache after new batch rows are flushed."""
+        self._views_cache = None
+
     def is_available(self) -> bool:
         """Return True when synthetic CSV files exist in data_dir."""
         required = ("finance_tx.csv", "habits_sleep.csv", "time_calendar.csv")

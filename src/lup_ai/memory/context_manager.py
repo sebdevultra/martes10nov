@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from lup_ai.data.local_store import LocalStore
+from lup_ai.memory.decision_tracker import DecisionTracker
 from lup_ai.privacy.text_anonymizer import TextAnonymizer
 
 
@@ -20,6 +21,7 @@ class SanitizedContextPacket:
     hard_constraints: list[dict[str, Any]]
     preferences: list[dict[str, Any]]
     recent_turns: list[dict[str, str]]
+    decision_adherence: dict[str, Any]
 
 
 class ContextManager:
@@ -34,6 +36,7 @@ class ContextManager:
     ) -> None:
         self._store = store
         self._anonymizer = anonymizer
+        self._tracker = DecisionTracker(store)
         self._max_goals = max_goals
         self._max_turns = max_turns
 
@@ -81,12 +84,15 @@ class ContextManager:
             for m in recent
         ]
 
+        adherence = self._tracker.adherence_summary().model_dump()
+
         return SanitizedContextPacket(
             session_id=session_id,
             active_goals=self._anonymizer.anonymize_payload(compact_goals, session_id),
             hard_constraints=self._anonymizer.anonymize_payload(hard_constraints, session_id),
             preferences=self._anonymizer.anonymize_payload(soft_prefs, session_id),
             recent_turns=self._anonymizer.anonymize_payload(compact_turns, session_id),
+            decision_adherence=adherence,
         )
 
     def record_turn(

@@ -91,6 +91,47 @@ class LocalStore:
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (session_id, alias_token)
                 );
+
+                CREATE TABLE IF NOT EXISTS decisions_log (
+                    decision_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    domain TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    prompt_summary TEXT NOT NULL DEFAULT '',
+                    recommendation_json TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    model_used TEXT NOT NULL,
+                    privacy_mode TEXT NOT NULL DEFAULT 'masked_cloud',
+                    source_type TEXT NOT NULL DEFAULT 'interactive',
+                    metric_name TEXT NOT NULL DEFAULT '',
+                    baseline_value REAL,
+                    user_action TEXT NOT NULL DEFAULT 'pending',
+                    user_feedback TEXT,
+                    actioned_at TEXT,
+                    evaluate_after_days INTEGER NOT NULL DEFAULT 7,
+                    synced_to_snowflake INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS decision_outcomes (
+                    outcome_id TEXT PRIMARY KEY,
+                    decision_id TEXT NOT NULL,
+                    evaluated_at TEXT NOT NULL,
+                    baseline_value REAL,
+                    observed_value REAL,
+                    delta_impact REAL NOT NULL,
+                    outcome_status TEXT NOT NULL,
+                    user_feedback TEXT,
+                    synced_to_snowflake INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS ingest_buffer (
+                    entry_id TEXT PRIMARY KEY,
+                    domain TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    synced_at TEXT,
+                    sync_status TEXT NOT NULL DEFAULT 'pending'
+                );
                 """
             )
 
@@ -320,3 +361,224 @@ class LocalStore:
                 (session_id, limit),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def clear_cache(self) -> None:
+        """Invalidate all cached metric snapshots after batch ingestion."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM metric_cache")
+
+    def record_decision(self, decision: dict[str, Any]) -> None:
+        """Insert or refresh a pending recommendation in local decisions_log."""
+        now_iso = self._utc_now().isoformat()
+        rec_json = (
+            decision["recommendation_json"]
+            if isinstance(decision["recommendation_json"], str)
+            else json.dumps(decision["recommendation_json"], default=str)
+        )
+        ev_json = (
+            decision["evidence_json"]
+            if isinstance(decision["evidence_json"], str)
+            else json.dumps(decision["evidence_json"], default=str)
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO decisions_log (
+                    decision_id, created_at, domain, title, prompt_summary,
+                    recommendation_json, evidence_json, model_used, privacy_mode,
+                    source_type, metric_name, baseline_value, user_action,
+                    evaluate_after_days
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(decision_id) DO UPDATE SET
+                    title = excluded.title,
+                    recommendation_json = excluded.recommendation_json,
+                    evidence_json = excluded.evidence_json,
+                    model_used = excluded.model_used
+                """,
+                (
+                    decision["decision_id"],
+                    decision.get("created_at") or now_iso,
+                    decision["domain"],
+                    decision["title"],
+                    decision.get("prompt_summary", ""),
+                    rec_json,
+                    ev_json,
+                    decision["model_used"],
+                    decision.get("privacy_mode", "masked_cloud"),
+                    decision.get("source_type", "interactive"),
+                    decision.get("metric_name", ""),
+                    decision.get("baseline_value"),
+                    decision.get("user_action", "pending"),
+                    int(decision.get("evaluate_after_days", 7)),
+                ),
+            )
+
+    def get_decision(self, decision_id: str) -> dict[str, Any] | None:
+        """Fetch a single decision row by identifier."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM decisions_log WHERE decision_id = ?",
+                (decision_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def list_decisions(
+        self,
+        user_action: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """List stored decisions filtered optionally by user_action status."""
+        with self._connect() as conn:
+            if user_action:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM decisions_log
+                    WHERE user_action = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (user_action, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM decisions_log
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def update_decision_action(
+        self,
+        decision_id: str,
+        user_action: str,
+        user_feedback: str | None = None,
+        actioned_at: str | None = None,
+        evaluate_after_days: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Record user acceptance, dismissal, or completion for a decision."""
+        ts = actioned_at or self._utc_now().isoformat()
+        with self._connect() as conn:
+            if evaluate_after_days is not None:
+                conn.execute(
+                    """
+                    UPDATE decisions_log
+                    SET user_action = ?, user_feedback = COALESCE(?, user_feedback),
+                        actioned_at = COALESCE(actioned_at, ?),
+                        evaluate_after_days = ?
+                    WHERE decision_id = ?
+                    """,
+                    (user_action, user_feedback, ts, int(evaluate_after_days), decision_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE decisions_log
+                    SET user_action = ?, user_feedback = COALESCE(?, user_feedback),
+                        actioned_at = COALESCE(actioned_at, ?)
+                    WHERE decision_id = ?
+                    """,
+                    (user_action, user_feedback, ts, decision_id),
+                )
+        return self.get_decision(decision_id)
+
+    def record_outcome(self, outcome: dict[str, Any]) -> None:
+        """Persist evaluated decision outcome into decision_outcomes."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO decision_outcomes (
+                    outcome_id, decision_id, evaluated_at, baseline_value,
+                    observed_value, delta_impact, outcome_status, user_feedback
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(outcome_id) DO UPDATE SET
+                    evaluated_at = excluded.evaluated_at,
+                    observed_value = excluded.observed_value,
+                    delta_impact = excluded.delta_impact,
+                    outcome_status = excluded.outcome_status,
+                    user_feedback = excluded.user_feedback
+                """,
+                (
+                    outcome["outcome_id"],
+                    outcome["decision_id"],
+                    outcome["evaluated_at"],
+                    outcome.get("baseline_value"),
+                    outcome.get("observed_value"),
+                    float(outcome["delta_impact"]),
+                    outcome["outcome_status"],
+                    outcome.get("user_feedback"),
+                ),
+            )
+
+    def list_outcomes(self, decision_id: str | None = None) -> list[dict[str, Any]]:
+        """Return evaluated decision outcomes ordered newest first."""
+        with self._connect() as conn:
+            if decision_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM decision_outcomes
+                    WHERE decision_id = ?
+                    ORDER BY evaluated_at DESC
+                    """,
+                    (decision_id,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM decision_outcomes ORDER BY evaluated_at DESC"
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def enqueue_ingest_event(self, entry_id: str, domain: str, payload: dict[str, Any]) -> None:
+        """Buffer a single personal data event locally before batch flush."""
+        now_iso = self._utc_now().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO ingest_buffer (entry_id, domain, payload_json, created_at, sync_status)
+                VALUES (?, ?, ?, ?, 'pending')
+                """,
+                (entry_id, domain, json.dumps(payload, default=str), now_iso),
+            )
+
+    def list_pending_ingest_events(self, domain: str | None = None) -> list[dict[str, Any]]:
+        """List buffered events awaiting batch sync."""
+        with self._connect() as conn:
+            if domain:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM ingest_buffer
+                    WHERE sync_status = 'pending' AND domain = ?
+                    ORDER BY created_at ASC
+                    """,
+                    (domain,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM ingest_buffer
+                    WHERE sync_status = 'pending'
+                    ORDER BY created_at ASC
+                    """
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_ingest_events_synced(self, entry_ids: list[str]) -> int:
+        """Mark flushed ingest events as synced."""
+        if not entry_ids:
+            return 0
+        now_iso = self._utc_now().isoformat()
+        placeholders = ",".join("?" for _ in entry_ids)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE ingest_buffer
+                SET sync_status = 'synced', synced_at = ?
+                WHERE entry_id IN ({placeholders})
+                """,
+                [now_iso, *entry_ids],
+            )
+            return int(cur.rowcount)

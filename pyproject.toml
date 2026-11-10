@@ -50,6 +50,7 @@ dev = [
 [project.scripts]
 lup = "lup_ai.cli.app:app"
 lup-seed = "lup_ai.seeds.generate_synthetic_data:main"
+lup-scan = "lup_ai.jobs.proactive_scan:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

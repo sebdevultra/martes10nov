@@ -33,6 +33,8 @@ Implementado en `src/lup_ai/data/local_store.py`:
 - `metric_cache`: caché JSON con expiración TTL en UTC.
 - `goals_mirror`, `preferences_mirror`: espejo local de objetivos y restricciones duras.
 - `pii_alias_map`: diccionario temporal de alias por sesión para re-hidratación local sin exposición a Cloud.
+- `decisions_log` y `decision_outcomes`: bandeja proactiva/interactiva de decisiones, feedback del usuario y evaluación real de impacto (Decision Outcome Loop).
+- `ingest_buffer`: cola transaccional local para captura incremental de eventos antes de sincronizar en lote (`BatchIngestor`) hacia Snowflake `RAW` o el espejo CSV local.
 
 ## 3. Datos Sintéticos Iniciales
 

@@ -9,7 +9,7 @@ Por decisión arquitectónica explícita (`ADR-002`), **LUP AI no utiliza capa d
 | Componente | Tecnología | Rol | Estado |
 |---|---|---|---|
 | Anonimización pre-LLM | Python (`TextAnonymizer`: regex determinista + adaptador Presidio opcional) | Detección y pseudonimización reversible de PII antes de salir de local | `Implemented` |
-| Cálculo analítico y simulación | Python (`pandas`, `numpy`, `scipy`) + Snowflake SQL | Tendencias, MAD/IQR/Z-score, simulaciones Monte Carlo What-If y recomendaciones con evidencia (`src/lup_ai/engines/`) | `Implemented` (motores base; integración `Planned`) |
+| Cálculo analítico y simulación | Python (`pandas`, `numpy`, `scipy`) + Snowflake SQL | Tendencias, MAD/IQR/Z-score, simulaciones Monte Carlo What-If y recomendaciones con evidencia (`src/lup_ai/engines/`) | `Implemented` |
 | Única capa LLM | **Gemini 3.8** (`gemini-3.8-flash` configurable) | Interpretación semántica, Text-to-SQL controlado y síntesis justificada | `Implemented` |
 
 ## 2. Política Única `masked_cloud`

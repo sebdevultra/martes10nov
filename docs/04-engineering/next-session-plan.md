@@ -36,27 +36,21 @@ Si acabas de abrir este repositorio en una nueva sesión de Antigravity, este do
   - `src/lup_ai/data/query_catalog.py` y `src/lup_ai/memory/context_manager.py`.
   - `src/lup_ai/llm/gemini_client.py` (`GeminiClient` en modo `masked_cloud`).
   - `src/lup_ai/agent/orchestrator.py` (`LupOrchestrator`), `src/lup_ai/api/main.py` (`FastAPI`) y `src/lup_ai/cli/app.py` (`lup`).
-- **Fase 2 (Parte A) — Núcleo de Motores Deterministas:**
-  - `src/lup_ai/engines/trend_analyzer.py` (`TrendAnalyzer`: medias 7d/30d/90d, WoW, pendiente, $R^2$, correlaciones Spearman con lag).
-  - `src/lup_ai/engines/anomaly_detector.py` (`AnomalyDetector`: MAD/IQR, rachas contra `hard_constraint` de sueño y oportunidades).
-  - `src/lup_ai/engines/simulation_engine.py` (`SimulationEngine`: bootstrap Monte Carlo p25/p50/p75, probabilidad de metas, colisiones y sensibilidad).
-  - `src/lup_ai/engines/recommendation_builder.py` (`RecommendationBuilder`: contrato obligatorio con `evidence` numérica).
-  - Pruebas unitarias en `tests/unit/test_engines.py`.
+- **Fase 2 — Motores Deterministas, Integración y Evals (`Implemented`):**
+  - `src/lup_ai/engines/trend_analyzer.py`, `anomaly_detector.py`, `simulation_engine.py`, `recommendation_builder.py`.
+  - Integración completa en `LupOrchestrator`, endpoints FastAPI (`GET /v1/trends`, `GET /v1/anomalies`, `POST /v1/simulate`), comandos CLI (`lup trends`, `lup anomalies`, `lup simulate`), pruebas en `tests/unit/test_engines.py`, `tests/integration/test_phase2_endpoints.py` y eval harness anti-alucinación en `tests/evals/test_zero_hallucination_evals.py`.
+- **Fase 3 — Proactividad, Decision Outcome Loop y Captura Batch (`Implemented`):**
+  - `src/lup_ai/memory/decision_tracker.py` (`DecisionTracker`), `src/lup_ai/jobs/proactive_scan.py` (`ProactiveScanner` / `lup-scan`), `src/lup_ai/data/batch_ingestor.py` (`BatchIngestor`), inyección de adherencia en `ContextManager`, endpoints (`/v1/decisions`, `/v1/decisions/{id}/feedback`, `/v1/decisions/outcomes`, `/v1/jobs/proactive-scan`, `/v1/ingest/capture`, `/v1/ingest/pending`, `/v1/ingest/flush`) y comandos CLI equivalentes.
+- **Fase 4 — Interfaz Visual en Streamlit y Fuentes Simuladas (`Implemented`):**
+  - `src/lup_ai/connectors/simulated_sources.py` (`SimulatedBankConnector`, `SimulatedWearableConnector`, `SimulatedCalendarConnector`, `SimulatedConnectorHub`) + endpoint `POST /v1/connectors/simulate-sync` + CLI `lup sync-simulated`.
+  - `src/lup_ai/ui/api_client.py` (`LupApiClient`) y `src/lup_ai/ui/streamlit_app.py` (`lup ui`) probados mediante `streamlit.testing.v1.AppTest`.
 
-### Pendiente por Implementar (`Planned`)
+### Próximos Pasos Opcionales (`Planned` Post-MVP)
 
-1. **Fase 2 (Parte B — Integración y Evals):**
-   - Conectar `TrendAnalyzer`, `AnomalyDetector`, `SimulationEngine` y `RecommendationBuilder` dentro de `LupOrchestrator.ask` (detección de intenciones de tendencias, anomalías/oportunidades y escenarios What-If).
-   - Exponer en `FastAPI` (`src/lup_ai/api/main.py` y `schemas.py`): `GET /v1/trends`, `GET /v1/anomalies` y `POST /v1/simulate`.
-   - Exponer en `CLI` (`src/lup_ai/cli/app.py`): `lup trends`, `lup anomalies`, `lup simulate`.
-   - Crear `tests/evals/test_zero_hallucination_evals.py` verificando 0 números inventados y 0 fuga de PII en simulaciones.
-2. **Fase 3 — Proactividad y Decision Outcome Loop:**
-   - `src/lup_ai/jobs/proactive_scan.py` (escaneo programado y bandeja local de decisiones).
-   - Registro y evaluación de impacto en `FCT_DECISIONS_LOG` y `FCT_DECISION_OUTCOMES` + endpoints de feedback (`POST /v1/decisions/{id}/feedback`).
-   - Buffer local en SQLite para captura rápida de registros cotidianos y sincronización batch a Snowflake.
-3. **Fase 4 — Interfaz Visual en Streamlit y Fuentes Reales:**
-   - Aplicación `Streamlit` consumiendo únicamente la API REST de `FastAPI` (`/v1/ask`, `/v1/trends`, `/v1/anomalies`, `/v1/simulate`, `/v1/goals`).
-   - Conectores/importadores para datos reales del usuario (extractos financieros, salud/sueño, calendario).
+1. **Integración en vivo (Credenciales Reales):**
+   - Configurar `.env` con credenciales de Snowflake y `GEMINI_API_KEY`, ejecutar `snowflake/ddl/01` a `05` y cargar datos en `@RAW.LUP_INTERNAL_STAGE`.
+2. **Reemplazo gradual de conectores simulados por APIs reales:**
+   - Implementar adaptadores OAuth/webhook reales manteniendo el mismo contrato hacia `BatchIngestor`.
 
 ---
 

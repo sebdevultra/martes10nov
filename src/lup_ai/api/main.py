@@ -6,25 +6,51 @@ from dataclasses import asdict
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import ValidationError
 
 from lup_ai import __version__
 from lup_ai.agent.orchestrator import LupOrchestrator, build_default_repository
 from lup_ai.api.schemas import (
+    AnomaliesResponse,
     AskRequest,
     AskResponse,
+    CaptureEventRequest,
+    CaptureResult,
     CatalogQueryResponse,
+    DecisionFeedbackRequest,
+    DecisionRecord,
     EvidenceSchema,
+    FlushResult,
     GoalSchema,
     HealthResponse,
+    OutcomesResponse,
+    PendingIngestResponse,
     PreferenceSchema,
+    ProactiveScanReport,
+    ProactiveScanRequest,
+    SimulatedSyncReport,
+    SimulatedSyncRequest,
+    SimulateRequest,
+    SimulateResponse,
+    TrendsResponse,
 )
 from lup_ai.config.settings import Settings, get_settings
+from lup_ai.connectors.simulated_sources import SimulatedConnectorHub
+from lup_ai.data.batch_ingestor import (
+    BatchIngestor,
+    FinanceEventInput,
+    HabitsSleepEventInput,
+    TimeBlockEventInput,
+)
+from lup_ai.data.local_csv_repo import LocalCsvAnalyticsRepository
 from lup_ai.data.local_store import LocalStore
 from lup_ai.data.query_catalog import QueryCatalog
 from lup_ai.data.repository import AnalyticsRepository
 from lup_ai.data.snowflake_client import SnowflakeAnalyticsRepository
 from lup_ai.data.sql_guard import SQLGuardError
+from lup_ai.jobs.proactive_scan import ProactiveScanner
 from lup_ai.llm.gemini_client import GeminiClient, LLMClient
+from lup_ai.memory.decision_tracker import DecisionTracker
 from lup_ai.privacy.text_anonymizer import PrivacyViolationError
 
 
@@ -50,6 +76,16 @@ def create_app(
         repo=active_repo,
         llm_client=active_llm,
     )
+    decision_tracker = DecisionTracker(local_store)
+    scanner = ProactiveScanner(store=local_store, repo=active_repo)
+    ingestor = BatchIngestor(
+        settings=cfg,
+        store=local_store,
+        local_csv_repo=(
+            active_repo if isinstance(active_repo, LocalCsvAnalyticsRepository) else None
+        ),
+    )
+    connector_hub = SimulatedConnectorHub(ingestor=ingestor)
 
     api = FastAPI(
         title="LUP AI API",
@@ -131,6 +167,46 @@ def create_app(
             rows=res.rows,
         )
 
+    @api.get("/v1/trends", response_model=TrendsResponse)
+    def get_trends(days: int = Query(default=90, ge=14, le=365)) -> TrendsResponse:
+        try:
+            analysis, evidence = orchestrator.analyze_trends(days=days)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return TrendsResponse(
+            evidence=EvidenceSchema(**asdict(evidence)),
+            analysis=analysis,
+        )
+
+    @api.get("/v1/anomalies", response_model=AnomaliesResponse)
+    def get_anomalies(days: int = Query(default=90, ge=14, le=365)) -> AnomaliesResponse:
+        try:
+            scan, recommendations, evidence = orchestrator.scan_anomalies(days=days)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        return AnomaliesResponse(
+            evidence=EvidenceSchema(**asdict(evidence)),
+            scan=scan,
+            recommendations=recommendations,
+        )
+
+    @api.post("/v1/simulate", response_model=SimulateResponse)
+    def simulate(payload: SimulateRequest) -> SimulateResponse:
+        try:
+            sim_result, recommendations, evidence = orchestrator.simulate(
+                scenario=payload.scenario,
+                baseline_days=payload.baseline_days,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return SimulateResponse(
+            evidence=EvidenceSchema(**asdict(evidence)),
+            simulation=sim_result,
+            recommendations=recommendations,
+        )
+
     @api.post("/v1/ask", response_model=AskResponse)
     def ask(payload: AskRequest) -> AskResponse:
         try:
@@ -148,10 +224,91 @@ def create_app(
             data_backend=result.data_backend,
             model_used=result.model_used,
             domain=result.domain,
+            analysis_type=result.analysis_type,
             key_observations=result.key_observations,
             evidence=EvidenceSchema(**asdict(result.evidence)),
             aggregates=result.aggregates,
             chart_series=result.chart_series,
+            recommendations=result.recommendations,
+            trends=result.trends,
+            anomaly_scan=result.anomaly_scan,
+            simulation=result.simulation,
+        )
+
+    @api.get("/v1/decisions/outcomes", response_model=OutcomesResponse)
+    def list_decision_outcomes(decision_id: str | None = None) -> OutcomesResponse:
+        return OutcomesResponse(
+            adherence_summary=decision_tracker.adherence_summary(),
+            outcomes=decision_tracker.list_outcomes(decision_id=decision_id),
+        )
+
+    @api.get("/v1/decisions", response_model=list[DecisionRecord])
+    def list_decisions(
+        status: Literal["pending", "accepted", "dismissed", "completed"] | None = None,
+        limit: int = Query(default=50, ge=1, le=200),
+    ) -> list[DecisionRecord]:
+        return decision_tracker.list_decisions(user_action=status, limit=limit)
+
+    @api.post("/v1/decisions/{decision_id}/feedback", response_model=DecisionRecord)
+    def record_decision_feedback(
+        decision_id: str,
+        payload: DecisionFeedbackRequest,
+    ) -> DecisionRecord:
+        try:
+            return decision_tracker.record_feedback(
+                decision_id=decision_id,
+                user_action=payload.user_action,
+                user_feedback=payload.user_feedback,
+                evaluate_after_days=payload.evaluate_after_days,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @api.post("/v1/jobs/proactive-scan", response_model=ProactiveScanReport)
+    def run_proactive_scan(
+        payload: ProactiveScanRequest | None = None,
+    ) -> ProactiveScanReport:
+        req = payload or ProactiveScanRequest()
+        try:
+            return scanner.run(
+                lookback_days=req.days,
+                evaluate_outcomes_force=req.evaluate_outcomes_force,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @api.get("/v1/ingest/pending", response_model=PendingIngestResponse)
+    def list_pending_ingest() -> PendingIngestResponse:
+        entries = local_store.list_pending_ingest_events()
+        return PendingIngestResponse(pending_count=len(entries), entries=entries)
+
+    @api.post("/v1/ingest/capture", response_model=CaptureResult)
+    def capture_event(payload: CaptureEventRequest) -> CaptureResult:
+        try:
+            if payload.domain == "finance":
+                return ingestor.capture_finance(FinanceEventInput.model_validate(payload.payload))
+            if payload.domain == "habits_sleep":
+                return ingestor.capture_habits_sleep(
+                    HabitsSleepEventInput.model_validate(payload.payload)
+                )
+            return ingestor.capture_time_block(TimeBlockEventInput.model_validate(payload.payload))
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=exc.errors()) from exc
+
+    @api.post("/v1/ingest/flush", response_model=FlushResult)
+    def flush_ingest_batch() -> FlushResult:
+        return ingestor.flush_batch()
+
+    @api.post("/v1/connectors/simulate-sync", response_model=SimulatedSyncReport)
+    def sync_simulated_sources(
+        payload: SimulatedSyncRequest | None = None,
+    ) -> SimulatedSyncReport:
+        req = payload or SimulatedSyncRequest()
+        return connector_hub.sync_all(
+            days=req.days,
+            seed=req.seed,
+            auto_flush=req.auto_flush,
+            sources=req.sources,
         )
 
     return api

@@ -6,6 +6,19 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from lup_ai.connectors.simulated_sources import SimulatedSyncReport
+from lup_ai.data.batch_ingestor import CaptureResult, FlushResult
+from lup_ai.engines.anomaly_detector import AnomalyScanResult
+from lup_ai.engines.recommendation_builder import RecommendationPayload
+from lup_ai.engines.simulation_engine import SimulationResult, SimulationScenario
+from lup_ai.engines.trend_analyzer import TrendAnalysisResult
+from lup_ai.jobs.proactive_scan import ProactiveScanReport
+from lup_ai.memory.decision_tracker import (
+    AdherenceSummary,
+    DecisionOutcomeRecord,
+    DecisionRecord,
+)
+
 
 class HealthResponse(BaseModel):
     """Service readiness and active privacy/backend metadata."""
@@ -47,10 +60,15 @@ class AskResponse(BaseModel):
     data_backend: str
     model_used: str
     domain: str
+    analysis_type: str = "summary"
     key_observations: list[str]
     evidence: EvidenceSchema
     aggregates: dict[str, Any]
     chart_series: list[dict[str, Any]]
+    recommendations: list[RecommendationPayload] = Field(default_factory=list)
+    trends: TrendAnalysisResult | None = None
+    anomaly_scan: AnomalyScanResult | None = None
+    simulation: SimulationResult | None = None
 
 
 class GoalSchema(BaseModel):
@@ -91,3 +109,104 @@ class CatalogQueryResponse(BaseModel):
     end_date: str | None = None
     aggregates: dict[str, Any]
     rows: list[dict[str, Any]]
+
+
+class TrendsResponse(BaseModel):
+    """Deterministic behavior and correlation report."""
+
+    evidence: EvidenceSchema
+    analysis: TrendAnalysisResult
+
+
+class AnomaliesResponse(BaseModel):
+    """Detected anomalies, opportunities, and justified recommendations."""
+
+    evidence: EvidenceSchema
+    scan: AnomalyScanResult
+    recommendations: list[RecommendationPayload]
+
+
+class SimulateRequest(BaseModel):
+    """What-If simulation request payload."""
+
+    scenario: SimulationScenario = Field(default_factory=SimulationScenario)
+    baseline_days: int = Field(default=180, ge=14, le=365)
+
+
+class SimulateResponse(BaseModel):
+    """What-If deterministic trajectories and justified recommendations."""
+
+    evidence: EvidenceSchema
+    simulation: SimulationResult
+    recommendations: list[RecommendationPayload]
+
+
+class DecisionFeedbackRequest(BaseModel):
+    """User feedback payload for a stored decision."""
+
+    user_action: Literal["accepted", "dismissed", "completed"]
+    user_feedback: str | None = Field(default=None, max_length=500)
+    evaluate_after_days: int | None = Field(default=None, ge=1, le=90)
+
+
+class OutcomesResponse(BaseModel):
+    """Historical decision adherence metrics and evaluated outcomes."""
+
+    adherence_summary: AdherenceSummary
+    outcomes: list[DecisionOutcomeRecord]
+
+
+class ProactiveScanRequest(BaseModel):
+    """Optional parameters for triggering a proactive scan."""
+
+    days: int = Field(default=90, ge=14, le=365)
+    evaluate_outcomes_force: bool = False
+
+
+class CaptureEventRequest(BaseModel):
+    """Unified incremental event capture request."""
+
+    domain: Literal["finance", "habits_sleep", "time_calendar"]
+    payload: dict[str, Any]
+
+
+class PendingIngestResponse(BaseModel):
+    """Summary of buffered events awaiting batch flush."""
+
+    pending_count: int
+    entries: list[dict[str, Any]]
+
+
+class SimulatedSyncRequest(BaseModel):
+    """Parameters for pulling simulated external feeds into BatchIngestor."""
+
+    days: int = Field(default=3, ge=1, le=30)
+    seed: int = 101
+    auto_flush: bool = True
+    sources: list[Literal["finance", "habits_sleep", "time_calendar"]] | None = None
+
+
+__all__ = [
+    "AnomaliesResponse",
+    "AskRequest",
+    "AskResponse",
+    "CaptureEventRequest",
+    "CaptureResult",
+    "CatalogQueryResponse",
+    "DecisionFeedbackRequest",
+    "DecisionRecord",
+    "EvidenceSchema",
+    "FlushResult",
+    "GoalSchema",
+    "HealthResponse",
+    "OutcomesResponse",
+    "PendingIngestResponse",
+    "PreferenceSchema",
+    "ProactiveScanReport",
+    "ProactiveScanRequest",
+    "SimulateRequest",
+    "SimulateResponse",
+    "SimulatedSyncReport",
+    "SimulatedSyncRequest",
+    "TrendsResponse",
+]

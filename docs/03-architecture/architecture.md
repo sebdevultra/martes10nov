@@ -7,19 +7,21 @@
 LUP AI adopta una arquitectura híbrida desacoplada sin capa de IA local:
 
 - **Snowflake Data Cloud (`LUP_AI_DB`)** (`Implemented` DDL): Almacén analítico OLAP multi-dominio con capas `RAW`, `CORE`, `ANALYTICS` y `SEMANTIC`.
-- **Núcleo Local Python + SQLite** (`Implemented` Fases 0–1; motores avanzados `Planned` Fase 2):
+- **Núcleo Local Python + SQLite** (`Implemented` Fases 0–4):
   - `Settings` (`src/lup_ai/config/settings.py`) — `Implemented`
   - `LocalStore` (`src/lup_ai/data/local_store.py`) — `Implemented`
   - `SQL Guard` (`src/lup_ai/data/sql_guard.py`) — `Implemented`
   - `SnowflakeAnalyticsRepository` y `LocalCsvAnalyticsRepository` — `Implemented`
-  - `QueryCatalog` (`src/lup_ai/data/query_catalog.py`) — `Implemented`
+  - `QueryCatalog` (`src/lup_ai/data/query_catalog.py`) y `BatchIngestor` (`src/lup_ai/data/batch_ingestor.py`) — `Implemented`
+  - `SimulatedConnectorHub` (`src/lup_ai/connectors/simulated_sources.py`) — `Implemented` (fuentes externas simuladas de Banco, Wearable y Calendario)
   - `TextAnonymizer` (`src/lup_ai/privacy/text_anonymizer.py`) — `Implemented`
-  - `ContextManager` (`src/lup_ai/memory/context_manager.py`) — `Implemented`
+  - `ContextManager` y `DecisionTracker` (`src/lup_ai/memory/`) — `Implemented`
+  - `ProactiveScanner` (`src/lup_ai/jobs/proactive_scan.py`) — `Implemented`
   - `LupOrchestrator` (`src/lup_ai/agent/orchestrator.py`) — `Implemented`
   - API REST (`FastAPI`) + CLI (`Typer`) — `Implemented`
-  - Motores deterministas de tendencias, anomalías, simulación What-If y recomendaciones (`src/lup_ai/engines/`) — `Implemented` (módulos base; integración en orquestador/API/CLI `Planned` para continuación de Fase 2)
+  - Motores deterministas de tendencias, anomalías, simulación What-If y recomendaciones (`src/lup_ai/engines/`) — `Implemented` (integrados en `LupOrchestrator`, FastAPI y CLI)
 - **Única Capa LLM (`Gemini 3.8` en Cloud)** (`Implemented` cliente en `src/lup_ai/llm/gemini_client.py`): Recibe exclusivamente prompts sanitizados y resúmenes numéricos agregados bajo política `masked_cloud`, con fallback determinista de catálogo cuando no hay API key configurada.
-- **Dashboard Visual (`Streamlit`)** (`Planned` Fase 4): Consumirá la API REST de FastAPI sin acoplar lógica de negocio a la UI.
+- **Dashboard Visual (`Streamlit`)** (`Implemented` en `src/lup_ai/ui/streamlit_app.py` + `LupApiClient`): Consume exclusivamente la API REST de FastAPI sin acoplar lógica de negocio ni conexiones de datos en la UI.
 
 ## 2. Almacenamiento Dual (OLAP vs. OLTP)
 

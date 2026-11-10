@@ -17,11 +17,11 @@
 | `REQ-002` | Configuración tipada, persistencia local SQLite y SQL Guard AST (`SEMANTIC.*`) | `Implemented` | Fase 0 |
 | `REQ-003` | Anonimización determinista Python pre-LLM (`TextAnonymizer` con reglas deterministas y soporte Presidio) en modo `masked_cloud` | `Implemented` | Fase 1 |
 | `REQ-004` | Consulta de datos personales (catálogo parametrizado + Text-to-SQL controlado con Gemini 3.8) vía CLI + FastAPI | `Implemented` | Fase 1 |
-| `REQ-005` | Análisis determinista de comportamientos, tendencias y correlaciones cruzadas | `Planned` | Fase 2 |
-| `REQ-006` | Detección estadística de anomalías y oportunidades (MAD/IQR/Z-score) | `Planned` | Fase 2 |
-| `REQ-007` | Simulaciones hipotéticas What-If (Base / Conservador / Optimista) y recomendaciones justificadas | `Planned` | Fase 2 |
-| `REQ-008` | Memoria de objetivos/preferencias, proactividad programada y Decision Outcome Loop | `Planned` | Fase 3 |
-| `REQ-009` | Interfaz visual interactiva en Streamlit sobre la API REST | `Planned` | Fase 4 |
+| `REQ-005` | Análisis determinista de comportamientos, tendencias y correlaciones cruzadas | `Implemented` | Fase 2 |
+| `REQ-006` | Detección estadística de anomalías y oportunidades (MAD/IQR/Z-score) | `Implemented` | Fase 2 |
+| `REQ-007` | Simulaciones hipotéticas What-If (Base / Conservador / Optimista) y recomendaciones justificadas | `Implemented` | Fase 2 |
+| `REQ-008` | Memoria de objetivos/preferencias, proactividad programada, captura batch y Decision Outcome Loop | `Implemented` | Fase 3 |
+| `REQ-009` | Interfaz visual interactiva en Streamlit sobre la API REST y conectores de fuentes externas simuladas | `Implemented` | Fase 4 |
 
 ## 3. Requisitos No Funcionales Clave
 

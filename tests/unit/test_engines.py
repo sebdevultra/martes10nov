@@ -77,4 +77,3 @@ def test_engines_pipeline_over_synthetic_dataset(tmp_path: Path) -> None:
     recs_sim = RecommendationBuilder().from_simulation(sim)
     assert recs_anom and all(len(r.evidence) >= 1 for r in recs_anom)
     assert recs_sim and all(len(r.evidence) >= 1 for r in recs_sim)
-

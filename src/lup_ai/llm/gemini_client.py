@@ -8,6 +8,7 @@ from typing import Any, Literal, Protocol, TypeVar
 from pydantic import BaseModel, Field, ValidationError
 
 from lup_ai.config.settings import Settings
+from lup_ai.engines.simulation_engine import SimulationScenario
 from lup_ai.privacy.text_anonymizer import TextAnonymizer
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
@@ -22,6 +23,7 @@ class IntentPlan(BaseModel):
 
     domain: Literal["finance", "habits_sleep", "time_calendar", "cross_domain", "goals"]
     mode: Literal["catalog", "semantic_sql"] = "catalog"
+    analysis_type: Literal["summary", "trends", "anomalies", "simulation"] = "summary"
     days: int = Field(default=30, ge=1, le=365)
     direction: Literal["income", "expense", "saving"] | None = None
     category: str | None = None
@@ -29,6 +31,7 @@ class IntentPlan(BaseModel):
     domain_tag: str | None = None
     block_type: str | None = None
     semantic_sql: str | None = None
+    simulation_params: SimulationScenario | None = None
     reasoning: str = ""
 
 
