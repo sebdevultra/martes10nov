@@ -1,7 +1,7 @@
 # Especificación de API REST y CLI: LUP AI
 
-**Estado:** `Implemented` (Fases 1–4)
-**Última actualización:** 2026-11-10 (America/Bogota)
+**Estado:** `Implemented` (Fases 1–4 + Scheduler & Sync Decisiones/Outcomes)
+**Última actualización:** 2026-11-12 (America/Bogota)
 
 ## 1. Endpoints FastAPI (`src/lup_ai/api/main.py`)
 
@@ -19,9 +19,10 @@
 | `POST` | `/v1/decisions/{decision_id}/feedback` | Registra aceptación, descarte o nota de feedback del usuario |
 | `GET` | `/v1/decisions/outcomes` | Métricas de adherencia (`AdherenceSummary`) e impactos evaluados |
 | `POST` | `/v1/jobs/proactive-scan` | Ejecuta escaneo proactivo de anomalías/oportunidades y evaluación de outcomes maduros |
+| `GET` | `/v1/jobs/scheduler` | Estado de `LupScheduler` (`APScheduler`) con intervalos, próximas ejecuciones y últimas marcas de escaneo/flush |
 | `GET` | `/v1/ingest/pending` | Lista eventos en cola local pendientes de sincronización batch |
 | `POST` | `/v1/ingest/capture` | Registra en cola local un evento de `finance`, `habits_sleep` o `time_calendar` |
-| `POST` | `/v1/ingest/flush` | Sincroniza en lote la cola local hacia Snowflake `RAW` o espejo CSV local |
+| `POST` | `/v1/ingest/flush` | Sincroniza en lote eventos hacia Snowflake `RAW`/CSV y replica `decisions_log` y `decision_outcomes` hacia `ANALYTICS.FCT_DECISIONS_LOG` y `FCT_DECISION_OUTCOMES` |
 | `POST` | `/v1/connectors/simulate-sync` | Extrae feeds simulados externos (Banco, Wearable, Calendario) hacia `BatchIngestor` |
 
 ### Integración Streamlit (`ADR-003` — `Implemented`)
@@ -41,9 +42,10 @@
 - `lup feedback <decision_id> <accepted|dismissed> [--note "..."]`: Registra decisión del usuario.
 - `lup scan [--days 90] [--force-outcomes]`: Ejecuta el escaneo proactivo (también disponible como `lup-scan`).
 - `lup capture-finance`, `lup capture-sleep`, `lup capture-time`: Capturan eventos cotidianos en buffer local.
-- `lup flush`: Sincroniza el buffer en lote hacia Snowflake `RAW` o el espejo CSV local.
+- `lup flush`: Sincroniza el buffer en lote hacia Snowflake `RAW` (o espejo CSV) y replica decisiones/outcomes pendientes hacia `ANALYTICS`.
 - `lup sync-simulated [--days 3 --seed 101 --no-flush]`: Sincroniza fuentes externas simuladas.
+- `lup scheduler [--run-once]`: Ejecuta en segundo plano el scheduler `APScheduler` (`proactive_scan_job` y `batch_flush_job`) o un ciclo único inmediato (también disponible como `lup-scheduler`).
 - `lup bootstrap-snowflake [--dry-run]`: Ejecuta DDL `01` a `05`, sube CSVs sintéticos al stage `@RAW.LUP_INTERNAL_STAGE` y valida las vistas `SEMANTIC`.
 - `lup ui [--port 8501]`: Lanza el dashboard interactivo en Streamlit.
-- `lup serve [--host 127.0.0.1 --port 8000]`: Inicia el servidor FastAPI con Uvicorn.
+- `lup serve [--host 127.0.0.1 --port 8000]`: Inicia el servidor FastAPI con Uvicorn y el ciclo de vida del scheduler `APScheduler`.
 

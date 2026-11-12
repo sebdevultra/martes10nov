@@ -394,7 +394,8 @@ class LocalStore:
                     title = excluded.title,
                     recommendation_json = excluded.recommendation_json,
                     evidence_json = excluded.evidence_json,
-                    model_used = excluded.model_used
+                    model_used = excluded.model_used,
+                    synced_to_snowflake = 0
                 """,
                 (
                     decision["decision_id"],
@@ -468,7 +469,8 @@ class LocalStore:
                     UPDATE decisions_log
                     SET user_action = ?, user_feedback = COALESCE(?, user_feedback),
                         actioned_at = COALESCE(actioned_at, ?),
-                        evaluate_after_days = ?
+                        evaluate_after_days = ?,
+                        synced_to_snowflake = 0
                     WHERE decision_id = ?
                     """,
                     (user_action, user_feedback, ts, int(evaluate_after_days), decision_id),
@@ -478,7 +480,8 @@ class LocalStore:
                     """
                     UPDATE decisions_log
                     SET user_action = ?, user_feedback = COALESCE(?, user_feedback),
-                        actioned_at = COALESCE(actioned_at, ?)
+                        actioned_at = COALESCE(actioned_at, ?),
+                        synced_to_snowflake = 0
                     WHERE decision_id = ?
                     """,
                     (user_action, user_feedback, ts, decision_id),
@@ -500,7 +503,8 @@ class LocalStore:
                     observed_value = excluded.observed_value,
                     delta_impact = excluded.delta_impact,
                     outcome_status = excluded.outcome_status,
-                    user_feedback = excluded.user_feedback
+                    user_feedback = excluded.user_feedback,
+                    synced_to_snowflake = 0
                 """,
                 (
                     outcome["outcome_id"],
@@ -582,3 +586,55 @@ class LocalStore:
                 [now_iso, *entry_ids],
             )
             return int(cur.rowcount)
+
+    def _mark_table_synced_to_snowflake(
+        self,
+        table: str,
+        id_column: str,
+        row_ids: list[str],
+    ) -> int:
+        if not row_ids:
+            return 0
+        placeholders = ",".join("?" for _ in row_ids)
+        with self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE {table} SET synced_to_snowflake = 1 WHERE {id_column} IN ({placeholders})",
+                row_ids,
+            )
+            return int(cur.rowcount)
+
+    def list_unsynced_decisions(self, limit: int = 200) -> list[dict[str, Any]]:
+        """List local decisions not yet replicated to Snowflake ANALYTICS.FCT_DECISIONS_LOG."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM decisions_log
+                WHERE synced_to_snowflake = 0
+                ORDER BY created_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_decisions_synced(self, decision_ids: list[str]) -> int:
+        """Mark decisions_log rows as replicated to Snowflake."""
+        return self._mark_table_synced_to_snowflake("decisions_log", "decision_id", decision_ids)
+
+    def list_unsynced_outcomes(self, limit: int = 200) -> list[dict[str, Any]]:
+        """List local outcomes not yet replicated to ANALYTICS.FCT_DECISION_OUTCOMES."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM decision_outcomes
+                WHERE synced_to_snowflake = 0
+                ORDER BY evaluated_at ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_outcomes_synced(self, outcome_ids: list[str]) -> int:
+        """Mark decision_outcomes rows as replicated to Snowflake."""
+        return self._mark_table_synced_to_snowflake("decision_outcomes", "outcome_id", outcome_ids)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import asdict
 from typing import Literal
 
@@ -28,6 +30,7 @@ from lup_ai.api.schemas import (
     PreferenceSchema,
     ProactiveScanReport,
     ProactiveScanRequest,
+    SchedulerStatus,
     SimulatedSyncReport,
     SimulatedSyncRequest,
     SimulateRequest,
@@ -49,6 +52,7 @@ from lup_ai.data.repository import AnalyticsRepository
 from lup_ai.data.snowflake_client import SnowflakeAnalyticsRepository
 from lup_ai.data.sql_guard import SQLGuardError
 from lup_ai.jobs.proactive_scan import ProactiveScanner
+from lup_ai.jobs.scheduler import LupScheduler
 from lup_ai.llm.gemini_client import GeminiClient, LLMClient
 from lup_ai.memory.decision_tracker import DecisionTracker
 from lup_ai.privacy.text_anonymizer import PrivacyViolationError
@@ -59,6 +63,7 @@ def create_app(
     store: LocalStore | None = None,
     repo: AnalyticsRepository | None = None,
     llm_client: LLMClient | None = None,
+    enable_scheduler: bool | None = None,
 ) -> FastAPI:
     """Create FastAPI instance with injectable dependencies for testing and deployment."""
     cfg = settings or get_settings()
@@ -86,12 +91,33 @@ def create_app(
         ),
     )
     connector_hub = SimulatedConnectorHub(ingestor=ingestor)
+    scheduler = LupScheduler(
+        settings=cfg,
+        store=local_store,
+        repo=active_repo,
+        ingestor=ingestor,
+        scanner=scanner,
+    )
+    should_start_scheduler = (
+        cfg.lup_scheduler_enabled if enable_scheduler is None else enable_scheduler
+    )
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        if should_start_scheduler:
+            scheduler.start()
+        try:
+            yield
+        finally:
+            scheduler.shutdown(wait=False)
 
     api = FastAPI(
         title="LUP AI API",
         version=__version__,
         description="Personal Decision Intelligence Agent API (masked_cloud, Snowflake + Python).",
+        lifespan=lifespan,
     )
+    api.state.scheduler = scheduler
 
     @api.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -276,6 +302,10 @@ def create_app(
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @api.get("/v1/jobs/scheduler", response_model=SchedulerStatus)
+    def get_scheduler_status() -> SchedulerStatus:
+        return scheduler.status()
 
     @api.get("/v1/ingest/pending", response_model=PendingIngestResponse)
     def list_pending_ingest() -> PendingIngestResponse:

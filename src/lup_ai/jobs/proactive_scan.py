@@ -63,7 +63,7 @@ class ProactiveScanner:
         evaluate_outcomes_force: bool = False,
     ) -> ProactiveScanReport:
         """Execute deterministic anomaly/opportunity scan and Decision Outcome Loop evaluation."""
-        end_date = self._anchor_date or date(2026, 11, 10)
+        end_date = self._anchor_date or date.today()
         start_date = end_date - timedelta(days=max(14, lookback_days) - 1)
         daily_rows = self._repo.fetch_cross_domain_daily(start_date=start_date, end_date=end_date)
         goals, prefs = self._load_goals_and_prefs()

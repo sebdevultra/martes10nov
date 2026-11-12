@@ -186,6 +186,8 @@ class SimulatedSyncRequest(BaseModel):
     sources: list[Literal["finance", "habits_sleep", "time_calendar"]] | None = None
 
 
+from lup_ai.jobs.scheduler import SchedulerStatus  # noqa: E402
+
 __all__ = [
     "AnomaliesResponse",
     "AskRequest",
@@ -204,6 +206,7 @@ __all__ = [
     "PreferenceSchema",
     "ProactiveScanReport",
     "ProactiveScanRequest",
+    "SchedulerStatus",
     "SimulateRequest",
     "SimulateResponse",
     "SimulatedSyncReport",

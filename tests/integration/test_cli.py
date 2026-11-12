@@ -26,6 +26,7 @@ def test_cli_help_and_commands_registered() -> None:
         "flush",
         "sync-simulated",
         "bootstrap-snowflake",
+        "scheduler",
         "ui",
         "serve",
     ):

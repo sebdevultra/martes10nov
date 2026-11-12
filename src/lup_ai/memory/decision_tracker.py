@@ -188,7 +188,7 @@ class DecisionTracker:
         force: bool = False,
     ) -> list[DecisionOutcomeRecord]:
         """Evaluate accepted decisions whose observation window has elapsed."""
-        ref_date = anchor_date or date(2026, 11, 10)
+        ref_date = anchor_date or date.today()
         accepted = self._store.list_decisions(user_action="accepted", limit=100)
         outcomes: list[DecisionOutcomeRecord] = []
 

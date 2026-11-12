@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 from typing import Literal
 
 import typer
@@ -28,6 +29,7 @@ from lup_ai.data.query_catalog import QueryCatalog
 from lup_ai.data.snowflake_client import SnowflakeAnalyticsRepository
 from lup_ai.engines.simulation_engine import SimulationScenario
 from lup_ai.jobs.proactive_scan import ProactiveScanner
+from lup_ai.jobs.scheduler import LupScheduler
 from lup_ai.llm.gemini_client import GeminiClient
 from lup_ai.memory.decision_tracker import DecisionTracker
 from lup_ai.seeds.bootstrap_snowflake import bootstrap_snowflake
@@ -445,7 +447,10 @@ def flush() -> None:
         local_csv_repo=repo if isinstance(repo, LocalCsvAnalyticsRepository) else None,
     )
     res = ingestor.flush_batch()
-    console.print(f"Flushed {res.flushed_count} events to {res.target_backend}: {res.by_domain}")
+    console.print(
+        f"Flushed {res.flushed_count} events to {res.target_backend}: {res.by_domain} "
+        f"(decisions_synced={res.decisions_synced}, outcomes_synced={res.outcomes_synced})"
+    )
 
 
 @app.command("sync-simulated")
@@ -514,6 +519,45 @@ def bootstrap_sf(
         f"cross_domain_rows={report.cross_domain_rows}, "
         f"goals_rows={report.goals_rows}"
     )
+
+
+@app.command()
+def scheduler(
+    run_once: bool = typer.Option(
+        False,
+        help="Execute one immediate proactive scan + batch flush cycle and exit.",
+    ),
+) -> None:
+    """Start APScheduler worker for periodic proactive scans and batch flushes."""
+    settings = get_settings()
+    store = LocalStore(settings.lup_sqlite_path)
+    repo = build_default_repository(settings)
+    sched = LupScheduler(settings=settings, store=store, repo=repo)
+
+    if run_once:
+        scan_res, flush_res = sched.run_cycle_once()
+        console.print(
+            f"Scheduler cycle: anomalies={scan_res.anomalies_found if scan_res else 'err'}, "
+            f"flushed_events={flush_res.flushed_count if flush_res else 'err'}, "
+            f"decisions_synced={flush_res.decisions_synced if flush_res else 'err'}, "
+            f"outcomes_synced={flush_res.outcomes_synced if flush_res else 'err'}"
+        )
+        return
+
+    if not sched.start():
+        console.print("Scheduler is disabled (LUP_SCHEDULER_ENABLED=false).")
+        raise typer.Exit(code=0)
+
+    console.print(
+        f"APScheduler active (scan every {settings.lup_proactive_scan_interval_minutes}m, "
+        f"flush every {settings.lup_batch_flush_interval_minutes}m). Ctrl+C to stop."
+    )
+    try:
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        sched.shutdown(wait=False)
+        console.print("Scheduler stopped.")
 
 
 @app.command()

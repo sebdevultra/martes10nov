@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     lup_api_host: str = "127.0.0.1"
     lup_api_port: int = Field(default=8000, ge=1, le=65535)
 
+    lup_scheduler_enabled: bool = True
+    lup_proactive_scan_interval_minutes: int = Field(default=720, ge=1, le=10080)
+    lup_batch_flush_interval_minutes: int = Field(default=60, ge=1, le=1440)
+    lup_proactive_scan_lookback_days: int = Field(default=90, ge=14, le=365)
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

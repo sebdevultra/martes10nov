@@ -17,6 +17,7 @@ dependencies = [
     "rich>=13.7.0",
     "httpx>=0.27.0",
     "SQLAlchemy>=2.0.0",
+    "APScheduler>=3.10.4,<4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -51,6 +52,7 @@ dev = [
 lup = "lup_ai.cli.app:app"
 lup-seed = "lup_ai.seeds.generate_synthetic_data:main"
 lup-scan = "lup_ai.jobs.proactive_scan:main"
+lup-scheduler = "lup_ai.jobs.scheduler:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -5,7 +5,8 @@ from __future__ import annotations
 import csv
 import json
 import uuid
-from datetime import date, datetime
+from collections.abc import Callable
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -80,10 +81,25 @@ class FlushResult(BaseModel):
     target_backend: str
     flushed_count: int
     by_domain: dict[str, int] = Field(default_factory=dict)
+    decisions_synced: int = 0
+    outcomes_synced: int = 0
 
 
 def _now_local(tz_name: str) -> datetime:
     return datetime.now(ZoneInfo(tz_name))
+
+
+def _to_snowflake_ntz(raw_ts: str | None) -> str:
+    """Normalize an ISO timestamp string into UTC YYYY-MM-DD HH:MM:SS.ffffff."""
+    if not raw_ts:
+        return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
+    try:
+        parsed = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(UTC).replace(tzinfo=None)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S.%f")
+    except ValueError:
+        return raw_ts[:26]
 
 
 def _append_csv_rows(csv_path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
@@ -106,10 +122,12 @@ class BatchIngestor:
         settings: Settings,
         store: LocalStore,
         local_csv_repo: LocalCsvAnalyticsRepository | None = None,
+        snowflake_conn_factory: Callable[[Settings], Any] | None = None,
     ) -> None:
         self._settings = settings
         self._store = store
         self._csv_repo = local_csv_repo or LocalCsvAnalyticsRepository()
+        self._snowflake_conn_factory = snowflake_conn_factory
 
     def capture_finance(self, event: FinanceEventInput) -> CaptureResult:
         """Validate and buffer a finance transaction in local SQLite."""
@@ -177,7 +195,10 @@ class BatchIngestor:
     def _snowflake_ingest_configured(self) -> bool:
         return has_valid_snowflake_credentials(self._settings)
 
-    def _flush_to_snowflake(self, grouped: dict[str, list[dict[str, Any]]]) -> None:
+    def _open_snowflake_connection(self) -> Any:
+        if self._snowflake_conn_factory is not None:
+            return self._snowflake_conn_factory(self._settings)
+
         import snowflake.connector
 
         conn_kwargs = build_snowflake_connect_kwargs(
@@ -187,7 +208,15 @@ class BatchIngestor:
             database=self._settings.snowflake_database,
             schema="RAW",
         )
-        conn = snowflake.connector.connect(**conn_kwargs)
+        return snowflake.connector.connect(**conn_kwargs)
+
+    def _flush_to_snowflake(
+        self,
+        grouped: dict[str, list[dict[str, Any]]],
+        decisions: list[dict[str, Any]],
+        outcomes: list[dict[str, Any]],
+    ) -> None:
+        conn = self._open_snowflake_connection()
         try:
             with conn.cursor() as cur:
                 if grouped["finance"]:
@@ -266,6 +295,92 @@ class BatchIngestor:
                             for r in grouped["time_calendar"]
                         ],
                     )
+                if decisions:
+                    cur.executemany(
+                        """
+                        MERGE INTO ANALYTICS.FCT_DECISIONS_LOG AS tgt
+                        USING (
+                            SELECT
+                                %s AS decision_id,
+                                TO_TIMESTAMP_NTZ(%s) AS created_at,
+                                %s AS domain,
+                                %s AS prompt_summary,
+                                PARSE_JSON(%s) AS recommendation_json,
+                                PARSE_JSON(%s) AS evidence_json,
+                                %s AS model_used,
+                                %s AS privacy_mode,
+                                %s AS user_action
+                        ) AS src
+                        ON tgt.decision_id = src.decision_id
+                        WHEN MATCHED THEN UPDATE SET
+                            tgt.user_action = src.user_action,
+                            tgt.recommendation_json = src.recommendation_json,
+                            tgt.evidence_json = src.evidence_json,
+                            tgt.model_used = src.model_used
+                        WHEN NOT MATCHED THEN INSERT (
+                            decision_id, created_at, domain, prompt_summary,
+                            recommendation_json, evidence_json, model_used,
+                            privacy_mode, user_action
+                        ) VALUES (
+                            src.decision_id, src.created_at, src.domain, src.prompt_summary,
+                            src.recommendation_json, src.evidence_json, src.model_used,
+                            src.privacy_mode, src.user_action
+                        )
+                        """,
+                        [
+                            (
+                                str(d["decision_id"])[:64],
+                                _to_snowflake_ntz(d.get("created_at")),
+                                str(d["domain"])[:32],
+                                str(d.get("prompt_summary") or "")[:512],
+                                d["recommendation_json"],
+                                d["evidence_json"],
+                                str(d["model_used"])[:64],
+                                str(d.get("privacy_mode") or "masked_cloud")[:32],
+                                str(d.get("user_action") or "pending")[:24],
+                            )
+                            for d in decisions
+                        ],
+                    )
+                if outcomes:
+                    cur.executemany(
+                        """
+                        MERGE INTO ANALYTICS.FCT_DECISION_OUTCOMES AS tgt
+                        USING (
+                            SELECT
+                                %s AS outcome_id,
+                                %s AS decision_id,
+                                TO_DATE(%s) AS evaluated_at,
+                                %s AS delta_impact,
+                                %s AS outcome_status,
+                                %s AS user_feedback
+                        ) AS src
+                        ON tgt.outcome_id = src.outcome_id
+                        WHEN MATCHED THEN UPDATE SET
+                            tgt.evaluated_at = src.evaluated_at,
+                            tgt.delta_impact = src.delta_impact,
+                            tgt.outcome_status = src.outcome_status,
+                            tgt.user_feedback = src.user_feedback
+                        WHEN NOT MATCHED THEN INSERT (
+                            outcome_id, decision_id, evaluated_at,
+                            delta_impact, outcome_status, user_feedback
+                        ) VALUES (
+                            src.outcome_id, src.decision_id, src.evaluated_at,
+                            src.delta_impact, src.outcome_status, src.user_feedback
+                        )
+                        """,
+                        [
+                            (
+                                str(o["outcome_id"])[:64],
+                                str(o["decision_id"])[:64],
+                                str(o["evaluated_at"])[:10],
+                                float(o["delta_impact"]),
+                                str(o["outcome_status"])[:24],
+                                (str(o["user_feedback"])[:512] if o.get("user_feedback") else None),
+                            )
+                            for o in outcomes
+                        ],
+                    )
         finally:
             conn.close()
 
@@ -325,10 +440,14 @@ class BatchIngestor:
         self._csv_repo.invalidate_cache()
 
     def flush_batch(self) -> FlushResult:
-        """Flush all pending buffered events in a single batch to Snowflake or local CSV mirror."""
+        """Flush buffered events and unsynced decisions/outcomes to Snowflake or CSV mirror."""
         pending = self._store.list_pending_ingest_events()
-        if not pending:
-            target = "snowflake" if self._snowflake_ingest_configured() else "local_synthetic_csv"
+        sf_enabled = self._snowflake_ingest_configured()
+        pending_decisions = self._store.list_unsynced_decisions() if sf_enabled else []
+        pending_outcomes = self._store.list_unsynced_outcomes() if sf_enabled else []
+        target = "snowflake" if sf_enabled else "local_synthetic_csv"
+
+        if not pending and not pending_decisions and not pending_outcomes:
             return FlushResult(target_backend=target, flushed_count=0, by_domain={})
 
         grouped: dict[str, list[dict[str, Any]]] = {
@@ -343,18 +462,30 @@ class BatchIngestor:
                 grouped[domain].append(json.loads(row["payload_json"]))
                 entry_ids.append(row["entry_id"])
 
-        if self._snowflake_ingest_configured():
-            self._flush_to_snowflake(grouped)
-            target = "snowflake"
+        decisions_synced = 0
+        outcomes_synced = 0
+        if sf_enabled:
+            self._flush_to_snowflake(grouped, pending_decisions, pending_outcomes)
+            if pending_decisions:
+                decisions_synced = self._store.mark_decisions_synced(
+                    [str(d["decision_id"]) for d in pending_decisions]
+                )
+            if pending_outcomes:
+                outcomes_synced = self._store.mark_outcomes_synced(
+                    [str(o["outcome_id"]) for o in pending_outcomes]
+                )
         else:
             self._flush_to_local_csv(grouped)
-            target = "local_synthetic_csv"
 
-        self._store.mark_ingest_events_synced(entry_ids)
-        self._store.clear_cache()
+        if entry_ids:
+            self._store.mark_ingest_events_synced(entry_ids)
+        if entry_ids or decisions_synced or outcomes_synced:
+            self._store.clear_cache()
 
         return FlushResult(
             target_backend=target,
             flushed_count=len(entry_ids),
             by_domain={k: len(v) for k, v in grouped.items() if v},
+            decisions_synced=decisions_synced,
+            outcomes_synced=outcomes_synced,
         )

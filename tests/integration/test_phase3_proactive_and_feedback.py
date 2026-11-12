@@ -13,13 +13,14 @@ from lup_ai.seeds.generate_synthetic_data import generate_dataset
 
 
 def test_phase3_proactive_feedback_and_ingest_endpoints(tmp_path: Path) -> None:
+    today = date.today()
     data_dir = tmp_path / "generated"
     db_path = tmp_path / "lup.db"
     generate_dataset(
         output_dir=data_dir,
         days=180,
         seed=42,
-        end_date=date(2026, 11, 10),
+        end_date=today,
         sqlite_path=db_path,
     )
 
@@ -94,7 +95,13 @@ def test_phase3_proactive_feedback_and_ingest_endpoints(tmp_path: Path) -> None:
     flush_resp = client.post("/v1/ingest/flush")
     assert flush_resp.status_code == 200
     assert flush_resp.json()["flushed_count"] == 1
+    assert flush_resp.json()["decisions_synced"] == 0
+    assert flush_resp.json()["outcomes_synced"] == 0
 
     cat_resp = client.get("/v1/catalog/finance?days=7&category=PHASE3_SMOKE_CAT")
     assert cat_resp.status_code == 200
     assert cat_resp.json()["aggregates"]["total_spend"] == 42000.0
+
+    sched_resp = client.get("/v1/jobs/scheduler")
+    assert sched_resp.status_code == 200
+    assert sched_resp.json()["proactive_scan_interval_minutes"] == 720

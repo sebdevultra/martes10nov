@@ -2,6 +2,17 @@
 
 Todos los cambios relevantes del proyecto **LUP AI** se registran en este archivo usando zona horaria `America/Bogota` (`YYYY-MM-DD HH:mm`).
 
+## [2026-11-12 11:18]
+
+- **[Added]** Se integró `APScheduler` (`APScheduler>=3.10.4,<4.0.0` en `pyproject.toml`, módulo `src/lup_ai/jobs/scheduler.py` con `LupScheduler`, script `lup-scheduler`, comando CLI `lup scheduler`, endpoint `GET /v1/jobs/scheduler`, variables `LUP_SCHEDULER_*` en `Settings`/`.env.example` y ciclo de vida `lifespan` en `FastAPI`) para ejecutar periódicamente `ProactiveScanner.run` y `BatchIngestor.flush_batch`, junto con pruebas en `tests/unit/test_scheduler.py`.
+  Motivo: Automatizar el escaneo proactivo y la sincronización por lotes sin depender de invocar `lup-scan` o `lup flush` manualmente.
+
+- **[Added]** Se implementó la replicación idempotente (`MERGE INTO`) de `decisions_log` y `decision_outcomes` hacia `ANALYTICS.FCT_DECISIONS_LOG` y `ANALYTICS.FCT_DECISION_OUTCOMES` durante `BatchIngestor.flush_batch` (`src/lup_ai/data/batch_ingestor.py`), añadiendo control `synced_to_snowflake` en `LocalStore` (`src/lup_ai/data/local_store.py`) y pruebas en `tests/unit/test_decision_tracker_and_ingest.py`.
+  Motivo: Persistir la trazabilidad completa de recomendaciones, acciones del usuario y evaluación de impacto en Snowflake al ejecutar cada flush batch.
+
+- **[Fixed]** Se corrigió la fecha ancla por defecto a `date.today()` en `ProactiveScanner.run` (`src/lup_ai/jobs/proactive_scan.py`) y `DecisionTracker.evaluate_pending_outcomes` (`src/lup_ai/memory/decision_tracker.py`), actualizando `tests/integration/test_phase3_proactive_and_feedback.py`.
+  Motivo: Evitar desfases temporales frente a `date(2026, 11, 10)` al ejecutar escaneos y evaluar outcomes en fechas reales posteriores.
+
 ## [2026-11-12 10:47]
 
 - **[Added]** Se añadieron reintentos con backoff y respaldo configurable entre modelos Gemini (`gemini_fallback_models`) ante errores transitorios (`503 UNAVAILABLE`, `429`, `404`, timeouts) en `GeminiClient.generate_structured` (`src/lup_ai/llm/gemini_client.py`, `src/lup_ai/config/settings.py`), propagando `last_used_model` en `LupOrchestrator`, junto con pruebas unitarias en `tests/unit/test_gemini_client.py`.
