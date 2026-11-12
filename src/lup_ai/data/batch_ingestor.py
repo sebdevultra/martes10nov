@@ -15,6 +15,10 @@ from pydantic import BaseModel, Field
 from lup_ai.config.settings import Settings
 from lup_ai.data.local_csv_repo import LocalCsvAnalyticsRepository
 from lup_ai.data.local_store import LocalStore
+from lup_ai.data.snowflake_client import (
+    build_snowflake_connect_kwargs,
+    has_valid_snowflake_credentials,
+)
 
 
 class FinanceEventInput(BaseModel):
@@ -171,23 +175,18 @@ class BatchIngestor:
         return CaptureResult(entry_id=entry_id, domain="time_calendar")
 
     def _snowflake_ingest_configured(self) -> bool:
-        has_auth = bool(
-            self._settings.snowflake_password or self._settings.snowflake_private_key_path
-        )
-        return bool(self._settings.snowflake_account and self._settings.snowflake_user and has_auth)
+        return has_valid_snowflake_credentials(self._settings)
 
     def _flush_to_snowflake(self, grouped: dict[str, list[dict[str, Any]]]) -> None:
         import snowflake.connector
 
-        conn_kwargs: dict[str, Any] = {
-            "account": self._settings.snowflake_account,
-            "user": self._settings.snowflake_user,
-            "role": self._settings.snowflake_role_ingest,
-            "warehouse": self._settings.snowflake_warehouse,
-            "database": self._settings.snowflake_database,
-            "schema": "RAW",
-            "password": self._settings.snowflake_password,
-        }
+        conn_kwargs = build_snowflake_connect_kwargs(
+            self._settings,
+            role=self._settings.snowflake_role_ingest,
+            warehouse=self._settings.snowflake_warehouse,
+            database=self._settings.snowflake_database,
+            schema="RAW",
+        )
         conn = snowflake.connector.connect(**conn_kwargs)
         try:
             with conn.cursor() as cur:

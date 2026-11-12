@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
+    gemini_fallback_models: str = "gemini-3.5-flash,gemini-3.6-flash,gemini-3.7-flash"
     gemini_timeout_seconds: int = Field(default=45, ge=5, le=180)
 
     snowflake_account: str = ""

@@ -30,6 +30,7 @@ from lup_ai.engines.simulation_engine import SimulationScenario
 from lup_ai.jobs.proactive_scan import ProactiveScanner
 from lup_ai.llm.gemini_client import GeminiClient
 from lup_ai.memory.decision_tracker import DecisionTracker
+from lup_ai.seeds.bootstrap_snowflake import bootstrap_snowflake
 
 app = typer.Typer(help="LUP AI Personal Decision Intelligence CLI.")
 console = Console()
@@ -491,6 +492,27 @@ def ui(
             str(port),
         ],
         check=True,
+    )
+
+
+@app.command("bootstrap-snowflake")
+def bootstrap_sf(
+    dry_run: bool = typer.Option(False, help="Validate DDL/seed files without connecting."),
+) -> None:
+    """Provision Snowflake LUP_AI_DB DDLs (01..05), upload synthetic CSVs, and verify views."""
+    settings = get_settings()
+    try:
+        report = bootstrap_snowflake(settings=settings, dry_run=dry_run)
+    except Exception as exc:
+        console.print(f"Error en bootstrap Snowflake: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    console.print(
+        f"Snowflake bootstrap (dry_run={report.dry_run}): "
+        f"ddl_scripts={report.ddl_scripts_executed}, "
+        f"uploaded={len(report.files_uploaded)}, "
+        f"cross_domain_rows={report.cross_domain_rows}, "
+        f"goals_rows={report.goals_rows}"
     )
 
 

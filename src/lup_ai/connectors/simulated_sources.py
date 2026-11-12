@@ -283,4 +283,3 @@ class SimulatedConnectorHub:
             flush_result=flush_res,
             sample_external_records=samples,
         )
-

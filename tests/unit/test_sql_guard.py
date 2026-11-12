@@ -43,3 +43,24 @@ def test_allows_with_cte_over_semantic_views_and_caps_limit() -> None:
 def test_rejects_unsafe_or_out_of_scope_queries(bad_sql: str) -> None:
     with pytest.raises(SQLGuardError):
         validate_and_prepare_sql(bad_sql)
+
+
+def test_allows_pyformat_placeholders_only_when_explicitly_enabled() -> None:
+    sql = (
+        "SELECT tx_date, total_amount FROM SEMANTIC.VW_FINANCE_SUMMARY "
+        "WHERE tx_date BETWEEN %s AND %s ORDER BY tx_date DESC"
+    )
+    with pytest.raises(SQLGuardError):
+        validate_and_prepare_sql(sql)
+
+    prepared = validate_and_prepare_sql(sql, allow_pyformat_params=True)
+    assert "BETWEEN %s AND %s" in prepared
+    assert "LIMIT 200" in prepared.upper()
+
+
+def test_still_rejects_forbidden_table_with_pyformat_placeholders() -> None:
+    with pytest.raises(SQLGuardError):
+        validate_and_prepare_sql(
+            "SELECT * FROM RAW.RAW_FINANCE_TX WHERE tx_date BETWEEN %s AND %s",
+            allow_pyformat_params=True,
+        )

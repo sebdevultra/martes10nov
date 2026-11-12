@@ -79,4 +79,3 @@ def test_simulated_connector_mappers_and_hub_sync(tmp_path: Path) -> None:
     assert report.flushed is True
     assert report.flush_result is not None
     assert report.flush_result.flushed_count == 8
-

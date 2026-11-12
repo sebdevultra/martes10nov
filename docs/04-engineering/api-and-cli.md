@@ -43,6 +43,7 @@
 - `lup capture-finance`, `lup capture-sleep`, `lup capture-time`: Capturan eventos cotidianos en buffer local.
 - `lup flush`: Sincroniza el buffer en lote hacia Snowflake `RAW` o el espejo CSV local.
 - `lup sync-simulated [--days 3 --seed 101 --no-flush]`: Sincroniza fuentes externas simuladas.
+- `lup bootstrap-snowflake [--dry-run]`: Ejecuta DDL `01` a `05`, sube CSVs sintéticos al stage `@RAW.LUP_INTERNAL_STAGE` y valida las vistas `SEMANTIC`.
 - `lup ui [--port 8501]`: Lanza el dashboard interactivo en Streamlit.
 - `lup serve [--host 127.0.0.1 --port 8000]`: Inicia el servidor FastAPI con Uvicorn.
 

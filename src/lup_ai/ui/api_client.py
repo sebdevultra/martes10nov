@@ -138,4 +138,3 @@ class LupApiClient:
         if sources:
             body["sources"] = sources
         return self._request("POST", "/v1/connectors/simulate-sync", json_body=body)
-

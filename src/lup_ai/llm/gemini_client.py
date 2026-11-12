@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from collections.abc import Callable
 from typing import Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, Field, ValidationError
@@ -65,13 +67,53 @@ class LLMClient(Protocol):
 class GeminiClient:
     """Google Gemini 3.8 client guarded by pre-call masked_cloud PII assertions."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        sleep_fn: Callable[[float], None] = time.sleep,
+    ) -> None:
         self._settings = settings
         self._client: Any | None = None
+        self._sleep = sleep_fn
+        self._last_used_model: str = settings.gemini_model
 
     @property
     def model_name(self) -> str:
         return self._settings.gemini_model
+
+    @property
+    def last_used_model(self) -> str:
+        """Return the model identifier that served the latest successful response."""
+        return self._last_used_model
+
+    def _candidate_models(self) -> list[str]:
+        candidates = [self._settings.gemini_model.strip()]
+        raw_fallbacks = getattr(self._settings, "gemini_fallback_models", "")
+        for item in raw_fallbacks.split(","):
+            name = item.strip()
+            if name and name not in candidates:
+                candidates.append(name)
+        return [c for c in candidates if c]
+
+    @staticmethod
+    def _is_transient_or_unavailable(exc: Exception) -> bool:
+        code = getattr(exc, "code", None)
+        if code in (404, 429, 500, 502, 503, 504):
+            return True
+        msg = str(exc).upper()
+        return any(
+            token in msg
+            for token in (
+                "503",
+                "UNAVAILABLE",
+                "HIGH DEMAND",
+                "429",
+                "RESOURCE_EXHAUSTED",
+                "404",
+                "NOT_FOUND",
+                "TIMEOUT",
+            )
+        )
 
     def is_configured(self) -> bool:
         key = self._settings.gemini_api_key.strip()
@@ -97,7 +139,7 @@ class GeminiClient:
         user_payload: dict[str, Any],
         schema: type[SchemaT],
     ) -> SchemaT:
-        """Enforce PII guardrail and obtain validated Pydantic output with up to 2 retries."""
+        """Enforce PII guardrail and obtain validated Pydantic output with retries/fallback."""
         TextAnonymizer.assert_no_pii(user_payload)
 
         from google.genai import types
@@ -106,28 +148,47 @@ class GeminiClient:
         prompt_text = json.dumps(user_payload, ensure_ascii=False, default=str)
         last_error: Exception | None = None
 
-        for attempt in range(3):
-            extra_hint = (
-                ""
-                if attempt == 0
-                else (
-                    f"\nPrevious validation error: {last_error}. Return valid JSON matching schema."
+        for model_candidate in self._candidate_models():
+            validation_error: Exception | None = None
+            for attempt in range(3):
+                extra_hint = (
+                    ""
+                    if validation_error is None
+                    else (
+                        f"\nPrevious validation error: {validation_error}. "
+                        "Return valid JSON matching schema."
+                    )
                 )
-            )
-            response = client.models.generate_content(
-                model=self._settings.gemini_model,
-                contents=f"{prompt_text}{extra_hint}",
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt,
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                    temperature=0.1,
-                ),
-            )
-            raw_text = (response.text or "").strip()
-            try:
-                return schema.model_validate_json(raw_text)
-            except ValidationError as exc:
-                last_error = exc
+                try:
+                    response = client.models.generate_content(
+                        model=model_candidate,
+                        contents=f"{prompt_text}{extra_hint}",
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt,
+                            response_mime_type="application/json",
+                            response_schema=schema,
+                            temperature=0.1,
+                        ),
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    if self._is_transient_or_unavailable(exc):
+                        if attempt < 2:
+                            self._sleep(0.8 * (attempt + 1))
+                            continue
+                        break
+                    raise
 
-        raise ValueError(f"Gemini output failed schema validation after retries: {last_error}")
+                raw_text = (response.text or "").strip()
+                try:
+                    parsed = schema.model_validate_json(raw_text)
+                    self._last_used_model = model_candidate
+                    return parsed
+                except ValidationError as exc:
+                    validation_error = exc
+                    last_error = exc
+
+        if isinstance(last_error, ValidationError):
+            raise ValueError(f"Gemini output failed schema validation after retries: {last_error}")
+        assert last_error is not None
+        raise last_error

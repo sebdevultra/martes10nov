@@ -2,6 +2,39 @@
 
 Todos los cambios relevantes del proyecto **LUP AI** se registran en este archivo usando zona horaria `America/Bogota` (`YYYY-MM-DD HH:mm`).
 
+## [2026-11-12 10:47]
+
+- **[Added]** Se añadieron reintentos con backoff y respaldo configurable entre modelos Gemini (`gemini_fallback_models`) ante errores transitorios (`503 UNAVAILABLE`, `429`, `404`, timeouts) en `GeminiClient.generate_structured` (`src/lup_ai/llm/gemini_client.py`, `src/lup_ai/config/settings.py`), propagando `last_used_model` en `LupOrchestrator`, junto con pruebas unitarias en `tests/unit/test_gemini_client.py`.
+  Motivo: Evitar caer al fallback determinista cuando el modelo principal configurado sufre picos intermitentes de demanda `503 UNAVAILABLE` en Google Gemini API.
+
+## [2026-11-12 10:33]
+
+- **[Fixed]** Se añadió degradación controlada ante errores transitorios de Gemini (como `503 UNAVAILABLE` o timeouts) en `LupOrchestrator._plan_intent` y `LupOrchestrator._synthesize_with_gemini_or_fallback` (`src/lup_ai/agent/orchestrator.py`), manteniendo `PrivacyViolationError` como fallo estricto (`fail-closed`), con prueba de integración en `tests/integration/test_orchestrator_and_api.py`.
+  Motivo: Garantizar que `lup ask` y `POST /v1/ask` entreguen el análisis determinista respaldado por Snowflake incluso cuando el endpoint Cloud de Gemini presente picos temporales de demanda.
+
+## [2026-11-12 10:23]
+
+- **[Fixed]** Se actualizó `validate_and_prepare_sql` en `src/lup_ai/data/sql_guard.py` con soporte opcional `allow_pyformat_params=True` para placeholders `%s` (manteniéndolos bloqueados por defecto en SQL abierto) y se normalizaron valores `Decimal` y `date`/`datetime` en `SnowflakeAnalyticsRepository._run_query` (`src/lup_ai/data/snowflake_client.py`), añadiendo pruebas en `tests/unit/test_sql_guard.py`.
+  Motivo: Evitar que `sqlglot` interprete `%s` como operador módulo (`Mod`) al validar consultas parametrizadas del catálogo contra Snowflake y garantizar compatibilidad numérica/JSON en caché local.
+
+## [2026-11-12 10:08]
+
+- **[Fixed]** Se corrigió `snowflake/ddl/01_databases_warehouses_roles.sql` para seleccionar `USE WAREHOUSE LUP_WH_XS` bajo `SYSADMIN` y envolver `CURRENT_USER()` entre comillas dobles (`'"' || REPLACE(CURRENT_USER(), '"', '""') || '"'`) en `LUP_TARGET_USER` antes de ejecutar `GRANT ROLE ... TO USER IDENTIFIER($LUP_TARGET_USER)`.
+  Motivo: Evitar el error SQL `002003 (User '...' does not exist or not authorized)` cuando el usuario de Snowflake tiene identificador en minúsculas o mixto, ya que `IDENTIFIER(...)` sin comillas dobles convierte la cadena a mayúsculas.
+
+## [2026-11-12 10:01]
+
+- **[Fixed]** Se actualizó `build_snowflake_connect_kwargs` en `src/lup_ai/data/snowflake_client.py` para autenticar llaves `.p8` con `authenticator="SNOWFLAKE_JWT"`, `private_key_file` (con expansión de `~` y validación de existencia) y `private_key_password`, añadiendo pruebas unitarias en `tests/unit/test_bootstrap_snowflake.py`.
+  Motivo: Evitar el error `390144 (JWT token is invalid)` en `snowflake-connector-python` 5.2.0 al enviar DER bytes sin `authenticator="SNOWFLAKE_JWT"`, unificando la conexión por llave `.p8` en `bootstrap-snowflake`, `SnowflakeAnalyticsRepository` y `BatchIngestor`.
+
+## [2026-11-10 12:28]
+
+- **[Added]** Se implementó el automatizador de aprovisionamiento Snowflake (`src/lup_ai/seeds/bootstrap_snowflake.py`, comando CLI `lup bootstrap-snowflake`) con pruebas unitarias (`tests/unit/test_bootstrap_snowflake.py`) y asignación automática de roles `LUP_INGEST_RW` y `LUP_AGENT_RO` al usuario actual en `snowflake/ddl/01_databases_warehouses_roles.sql`.
+  Motivo: Permitir ejecutar DDLs `01` a `05`, subir CSVs al stage con `PUT`, cargar `load_synthetic_data.sql` y refrescar Dynamic Tables directamente desde la terminal sin requerir SnowSQL ni pasos manuales en Snowsight.
+
+- **[Fixed]** Se unificó la detección de credenciales no-placeholder (`has_valid_snowflake_credentials`) y construcción de conexión (`build_snowflake_connect_kwargs`) en `src/lup_ai/data/snowflake_client.py` reutilizada por `BatchIngestor`.
+  Motivo: Evitar que valores plantilla de `.env.example` se interpreten como credenciales reales y soportar autenticación con contraseña o llave privada de manera uniforme.
+
 ## [2026-11-10 12:19]
 
 - **[Added]** Se implementó la Fase 4 con fuentes externas simuladas y dashboard visual en Streamlit: conectores simulados (`src/lup_ai/connectors/simulated_sources.py`: `SimulatedBankConnector`, `SimulatedWearableConnector`, `SimulatedCalendarConnector`, `SimulatedConnectorHub`), cliente HTTP desacoplado (`src/lup_ai/ui/api_client.py`), dashboard interactivo (`src/lup_ai/ui/streamlit_app.py`), endpoint `POST /v1/connectors/simulate-sync`, comandos CLI `lup sync-simulated` y `lup ui`, y pruebas unitarias e integración con `streamlit.testing.v1.AppTest` (`tests/unit/test_simulated_connectors.py` y `tests/integration/test_phase4_connectors_and_ui.py`).

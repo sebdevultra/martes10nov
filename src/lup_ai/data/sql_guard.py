@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import sqlglot
 from sqlglot import exp
 
@@ -86,19 +88,46 @@ def _enforce_limit(tree: exp.Select, max_limit: int) -> exp.Select:
     return tree.limit(max_limit)
 
 
+_PYFORMAT_TOKEN_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|(%s)")
+_PLACEHOLDER_PREFIX = "__lup_param_"
+
+
+def _swap_pyformat_placeholders(sql: str) -> tuple[str, list[str]]:
+    """Replace DB-API %s placeholders outside literals with sqlglot-parseable bind names."""
+    if f":{_PLACEHOLDER_PREFIX}" in sql:
+        raise SQLGuardError("Reserved placeholder token is not permitted in SQL query.")
+
+    tokens: list[str] = []
+
+    def _replace(match: re.Match[str]) -> str:
+        if match.group(1) is None:
+            return match.group(0)
+        token = f":{_PLACEHOLDER_PREFIX}{len(tokens)}__"
+        tokens.append(token)
+        return token
+
+    return _PYFORMAT_TOKEN_RE.sub(_replace, sql), tokens
+
+
 def validate_and_prepare_sql(
     sql: str,
     allowed_views: frozenset[str] = ALLOWED_SEMANTIC_VIEWS,
     allowed_database: str = "LUP_AI_DB",
     allowed_schema: str = "SEMANTIC",
     max_limit: int = 200,
+    allow_pyformat_params: bool = False,
 ) -> str:
     """Validate that SQL is a single read-only SELECT over SEMANTIC views and cap LIMIT."""
     if not sql or not sql.strip():
         raise SQLGuardError("SQL query cannot be empty.")
 
+    parse_sql = sql
+    placeholder_tokens: list[str] = []
+    if allow_pyformat_params:
+        parse_sql, placeholder_tokens = _swap_pyformat_placeholders(sql)
+
     try:
-        statements = sqlglot.parse(sql, read="snowflake")
+        statements = sqlglot.parse(parse_sql, read="snowflake")
     except sqlglot.errors.ParseError as exc:
         raise SQLGuardError(f"Invalid SQL syntax: {exc}") from exc
 
@@ -129,4 +158,7 @@ def validate_and_prepare_sql(
         )
 
     bounded_tree = _enforce_limit(tree, max_limit=max_limit)
-    return bounded_tree.sql(dialect="snowflake")
+    prepared_sql = bounded_tree.sql(dialect="snowflake")
+    for token in placeholder_tokens:
+        prepared_sql = prepared_sql.replace(token, "%s", 1)
+    return prepared_sql

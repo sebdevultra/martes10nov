@@ -55,4 +55,3 @@ def test_phase4_simulated_connectors_and_streamlit_dashboard(tmp_path: Path) -> 
     assert not at.exception
     assert any("LUP AI" in t.value for t in at.title)
     assert len(at.metric) >= 4
-

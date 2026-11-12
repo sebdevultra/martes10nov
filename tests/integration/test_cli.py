@@ -25,6 +25,7 @@ def test_cli_help_and_commands_registered() -> None:
         "capture-time",
         "flush",
         "sync-simulated",
+        "bootstrap-snowflake",
         "ui",
         "serve",
     ):

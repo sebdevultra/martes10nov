@@ -160,3 +160,50 @@ def test_api_offline_fallback_and_sql_guard_recovery(tmp_path: Path) -> None:
     resp2 = client_guarded.post("/v1/ask", json={"question": "Dame una vista rara del sistema"})
     assert resp2.status_code == 200
     assert resp2.json()["evidence"]["source_view"] == "SEMANTIC.VW_FINANCE_SUMMARY"
+
+
+class _UnavailableGeminiClient:
+    """Simulates a transient Gemini 503/network outage."""
+
+    @property
+    def model_name(self) -> str:
+        return "gemini-3.8-flash"
+
+    def is_configured(self) -> bool:
+        return True
+
+    def generate_structured(
+        self,
+        system_prompt: str,
+        user_payload: dict[str, Any],
+        schema: type[T],
+    ) -> T:
+        raise RuntimeError("503 UNAVAILABLE: high demand")
+
+
+def test_api_transient_gemini_error_degrades_to_deterministic_fallback(tmp_path: Path) -> None:
+    data_dir = tmp_path / "generated"
+    db_path = tmp_path / "lup.db"
+    generate_dataset(
+        output_dir=data_dir, days=30, seed=15, end_date=date(2026, 11, 10), sqlite_path=db_path
+    )
+    settings = Settings(_env_file=None, lup_sqlite_path=db_path, gemini_api_key="test-key")
+    store = LocalStore(db_path)
+    repo = LocalCsvAnalyticsRepository(data_dir=data_dir)
+    app = create_app(
+        settings=settings,
+        store=store,
+        repo=repo,
+        llm_client=_UnavailableGeminiClient(),
+    )
+    client = TestClient(app)
+
+    resp = client.post(
+        "/v1/ask",
+        json={"question": "¿Cómo vienen mis gastos discrecionales y mi sueño en 30 días?"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["model_used"] == "deterministic_fallback"
+    assert body["evidence"]["row_count"] > 0
+    assert any("Degradación controlada" in obs for obs in body["key_observations"])

@@ -28,7 +28,12 @@ Sistema inteligente que transforma datos cotidianos almacenados en **Snowflake**
    ```bash
    .venv/bin/lup-seed --output-dir data/generated --days 180 --seed 42 --sqlite-path data/lup_ai_local.db
    ```
-4. Opcionalmente, en tu cuenta Snowflake, ejecutar `snowflake/ddl/01` a `05` y cargar `data/generated/` con `snowflake/seeds/load_synthetic_data.sql` (si no hay credenciales Snowflake configuradas, el sistema consulta automáticamente `data/generated/`).
+4. Conectar Snowflake (opcional; sin credenciales usa `data/generated/` automáticamente):
+   ```bash
+   cp .env.example .env
+   # Completa SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD y GEMINI_API_KEY en .env
+   .venv/bin/lup bootstrap-snowflake
+   ```
 5. Usar CLI y API REST:
    ```bash
    .venv/bin/lup status

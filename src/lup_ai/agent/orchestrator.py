@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -26,7 +27,9 @@ from lup_ai.engines.trend_analyzer import TrendAnalysisResult, TrendAnalyzer
 from lup_ai.llm.gemini_client import GeminiClient, IntentPlan, LLMClient, SynthesizedAnswer
 from lup_ai.memory.context_manager import ContextManager, SanitizedContextPacket
 from lup_ai.memory.decision_tracker import DecisionTracker
-from lup_ai.privacy.text_anonymizer import TextAnonymizer
+from lup_ai.privacy.text_anonymizer import PrivacyViolationError, TextAnonymizer
+
+_LOGGER = logging.getLogger(__name__)
 
 _PLANNER_SYSTEM_PROMPT = (
     "You are LUP AI query planner. Select analysis_type ('summary', 'trends', 'anomalies', "
@@ -548,7 +551,15 @@ class LupOrchestrator:
                 "question": sanitized_question,
                 "context": asdict(context_packet),
             }
-            return self._llm.generate_structured(_PLANNER_SYSTEM_PROMPT, payload, IntentPlan)
+            try:
+                return self._llm.generate_structured(_PLANNER_SYSTEM_PROMPT, payload, IntentPlan)
+            except PrivacyViolationError:
+                raise
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Gemini intent planning unavailable, falling back: %s",
+                    type(exc).__name__,
+                )
 
         return IntentPlan(
             domain="cross_domain",
@@ -617,12 +628,30 @@ class LupOrchestrator:
             },
             session_id=session_id,
         )
-        synthesized = self._llm.generate_structured(
-            _SYNTHESIS_SYSTEM_PROMPT,
-            synth_payload,
-            SynthesizedAnswer,
-        )
-        return synthesized, self._llm.model_name
+        try:
+            synthesized = self._llm.generate_structured(
+                _SYNTHESIS_SYSTEM_PROMPT,
+                synth_payload,
+                SynthesizedAnswer,
+            )
+            used_model = getattr(self._llm, "last_used_model", self._llm.model_name)
+            return synthesized, used_model
+        except PrivacyViolationError:
+            raise
+        except Exception as exc:
+            _LOGGER.warning("Gemini synthesis unavailable, falling back: %s", type(exc).__name__)
+            fallback_with_notice = SynthesizedAnswer(
+                answer=fallback_answer.answer,
+                key_observations=[
+                    *fallback_answer.key_observations,
+                    (
+                        "Degradación controlada: Gemini no estuvo disponible "
+                        f"({type(exc).__name__}); se muestra resumen determinista."
+                    ),
+                ],
+                goal_alignment_note=fallback_answer.goal_alignment_note,
+            )
+            return fallback_with_notice, "deterministic_fallback"
 
     def ask(self, question: str, session_id: str | None = None) -> AskResult:
         """Process a user question end-to-end under strict masked_cloud privacy guarantees."""
