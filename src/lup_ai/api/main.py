@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import io
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from typing import Literal
+from typing import Any, Literal
 
-from fastapi import FastAPI, HTTPException, Query
+from apscheduler.schedulers.background import BackgroundScheduler
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, status
 from pydantic import ValidationError
 
 from lup_ai import __version__
@@ -23,11 +26,16 @@ from lup_ai.api.schemas import (
     DecisionRecord,
     EvidenceSchema,
     FlushResult,
+    GoalCreate,
     GoalSchema,
+    GoalUpdate,
     HealthResponse,
+    ManualIngestResponse,
     OutcomesResponse,
     PendingIngestResponse,
+    PreferenceCreate,
     PreferenceSchema,
+    PreferenceUpdate,
     ProactiveScanReport,
     ProactiveScanRequest,
     SchedulerStatus,
@@ -38,6 +46,9 @@ from lup_ai.api.schemas import (
     TrendsResponse,
 )
 from lup_ai.config.settings import Settings, get_settings
+from lup_ai.connectors.real_sources import (
+    RealConnectorHub,
+)
 from lup_ai.connectors.simulated_sources import SimulatedConnectorHub
 from lup_ai.data.batch_ingestor import (
     BatchIngestor,
@@ -58,6 +69,37 @@ from lup_ai.memory.decision_tracker import DecisionTracker
 from lup_ai.privacy.text_anonymizer import PrivacyViolationError
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    scheduler = BackgroundScheduler()
+    # Configurar el job para que corra diario (ej. a las 02:00 AM)
+    # Deberá instanciar el ProactiveScanner y el BatchIngestor
+    # localmente o usar referencias globales seguras
+    cfg = getattr(app.state, "settings", None) or get_settings()
+    store = getattr(app.state, "store", None) or LocalStore(cfg.lup_sqlite_path)
+    repo = getattr(app.state, "repo", None) or build_default_repository(cfg)
+    scanner = getattr(app.state, "scanner", None) or ProactiveScanner(store=store, repo=repo)
+    batch_ingestor = getattr(app.state, "ingestor", None) or BatchIngestor(
+        settings=cfg,
+        store=store,
+        local_csv_repo=(repo if isinstance(repo, LocalCsvAnalyticsRepository) else None),
+    )
+    scheduler.add_job(scanner.run, "cron", hour=2, minute=0)
+    scheduler.add_job(batch_ingestor.flush_batch, "cron", hour=2, minute=30)
+    scheduler.start()
+    lup_sched = getattr(app.state, "scheduler", None)
+    should_start = getattr(app.state, "should_start_scheduler", False)
+    if lup_sched and should_start:
+        lup_sched.start()
+    try:
+        yield
+    finally:
+        if scheduler.running:
+            scheduler.shutdown()
+        if lup_sched and lup_sched.is_running:
+            lup_sched.shutdown(wait=False)
+
+
 def create_app(
     settings: Settings | None = None,
     store: LocalStore | None = None,
@@ -67,7 +109,7 @@ def create_app(
 ) -> FastAPI:
     """Create FastAPI instance with injectable dependencies for testing and deployment."""
     cfg = settings or get_settings()
-    local_store = store or LocalStore(cfg.lup_sqlite_path)
+    local_store = store or LocalStore(cfg.lup_sqlite_path, settings=cfg)
     active_repo = repo or build_default_repository(cfg)
     active_llm = llm_client or GeminiClient(cfg)
     catalog = QueryCatalog(
@@ -91,6 +133,7 @@ def create_app(
         ),
     )
     connector_hub = SimulatedConnectorHub(ingestor=ingestor)
+    real_connector_hub = RealConnectorHub(ingestor=ingestor)
     scheduler = LupScheduler(
         settings=cfg,
         store=local_store,
@@ -102,22 +145,33 @@ def create_app(
         cfg.lup_scheduler_enabled if enable_scheduler is None else enable_scheduler
     )
 
-    @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        if should_start_scheduler:
-            scheduler.start()
-        try:
-            yield
-        finally:
-            scheduler.shutdown(wait=False)
-
-    api = FastAPI(
+    app = FastAPI(
         title="LUP AI API",
         version=__version__,
         description="Personal Decision Intelligence Agent API (masked_cloud, Snowflake + Python).",
         lifespan=lifespan,
     )
-    api.state.scheduler = scheduler
+    api = app
+    app.state.settings = cfg
+    app.state.store = local_store
+    app.state.repo = active_repo
+    app.state.scanner = scanner
+    app.state.ingestor = ingestor
+    app.state.scheduler = scheduler
+    app.state.should_start_scheduler = should_start_scheduler
+
+    def _sync_csv_after_change() -> None:
+        if isinstance(active_repo, LocalCsvAnalyticsRepository) and active_repo.data_dir.exists():
+            goals_file = active_repo.data_dir / "goals.json"
+            goals_file.write_text(
+                json.dumps(local_store.list_active_goals(), indent=2), encoding="utf-8"
+            )
+            prefs_file = active_repo.data_dir / "preferences.json"
+            prefs_file.write_text(
+                json.dumps(local_store.list_preferences(), indent=2), encoding="utf-8"
+            )
+            active_repo.invalidate_cache()
+        local_store.clear_cache()
 
     @api.get("/health", response_model=HealthResponse)
     def health() -> HealthResponse:
@@ -132,7 +186,7 @@ def create_app(
             sqlite_path=str(cfg.lup_sqlite_path),
         )
 
-    @api.get("/v1/goals", response_model=list[GoalSchema])
+    @app.get("/v1/goals", response_model=list[GoalSchema])
     def list_goals() -> list[GoalSchema]:
         try:
             res = catalog.query_goals()
@@ -142,9 +196,67 @@ def create_app(
             pass
         return [GoalSchema(**row) for row in local_store.list_active_goals()]
 
-    @api.get("/v1/preferences", response_model=list[PreferenceSchema])
+    @app.post("/v1/goals", response_model=GoalSchema, status_code=status.HTTP_201_CREATED)
+    def create_goal(payload: GoalCreate) -> GoalSchema:
+        created = local_store.create_goal(payload.model_dump())
+        _sync_csv_after_change()
+        return GoalSchema(**created)
+
+    @app.get("/v1/goals/{goal_id}", response_model=GoalSchema)
+    def get_goal(goal_id: str) -> GoalSchema:
+        goal = local_store.get_goal(goal_id)
+        if goal is None:
+            raise HTTPException(status_code=404, detail=f"Goal '{goal_id}' not found")
+        return GoalSchema(**goal)
+
+    @app.put("/v1/goals/{goal_id}", response_model=GoalSchema)
+    def update_goal(goal_id: str, payload: GoalUpdate) -> GoalSchema:
+        updated = local_store.update_goal(goal_id, payload.model_dump(exclude_unset=True))
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Goal '{goal_id}' not found")
+        _sync_csv_after_change()
+        return GoalSchema(**updated)
+
+    @app.delete("/v1/goals/{goal_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_goal(goal_id: str) -> None:
+        deleted = local_store.delete_goal(goal_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Goal '{goal_id}' not found")
+        _sync_csv_after_change()
+
+    @app.get("/v1/preferences", response_model=list[PreferenceSchema])
     def list_preferences() -> list[PreferenceSchema]:
         return [PreferenceSchema(**row) for row in local_store.list_preferences()]
+
+    @app.post(
+        "/v1/preferences", response_model=PreferenceSchema, status_code=status.HTTP_201_CREATED
+    )
+    def create_preference(payload: PreferenceCreate) -> PreferenceSchema:
+        created = local_store.create_preference(payload.model_dump())
+        _sync_csv_after_change()
+        return PreferenceSchema(**created)
+
+    @app.get("/v1/preferences/{pref_id}", response_model=PreferenceSchema)
+    def get_preference(pref_id: str) -> PreferenceSchema:
+        pref = local_store.get_preference(pref_id)
+        if pref is None:
+            raise HTTPException(status_code=404, detail=f"Preference '{pref_id}' not found")
+        return PreferenceSchema(**pref)
+
+    @app.put("/v1/preferences/{pref_id}", response_model=PreferenceSchema)
+    def update_preference(pref_id: str, payload: PreferenceUpdate) -> PreferenceSchema:
+        updated = local_store.update_preference(pref_id, payload.model_dump(exclude_unset=True))
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Preference '{pref_id}' not found")
+        _sync_csv_after_change()
+        return PreferenceSchema(**updated)
+
+    @app.delete("/v1/preferences/{pref_id}", status_code=status.HTTP_204_NO_CONTENT)
+    def delete_preference(pref_id: str) -> None:
+        deleted = local_store.delete_preference(pref_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail=f"Preference '{pref_id}' not found")
+        _sync_csv_after_change()
 
     @api.get("/v1/catalog/{domain}", response_model=CatalogQueryResponse)
     def query_catalog(
@@ -339,6 +451,76 @@ def create_app(
             seed=req.seed,
             auto_flush=req.auto_flush,
             sources=req.sources,
+        )
+
+    @api.post("/v1/ingest/bank/csv", response_model=ManualIngestResponse)
+    async def ingest_bank_csv(
+        file: UploadFile = File(...),  # noqa: B008
+        auto_flush: bool = Query(default=False),
+    ) -> ManualIngestResponse:
+        content = await file.read()
+        text = content.decode("utf-8-sig", errors="replace")
+        connector = real_connector_hub.bank
+        events = connector.parse_csv(io.StringIO(text))
+        entry_ids = [ingestor.capture_finance(ev).entry_id for ev in events]
+        flush_res = ingestor.flush_batch() if (auto_flush and entry_ids) else None
+        return ManualIngestResponse(
+            status="ok",
+            domain="finance",
+            connector=connector.source_name,
+            events_captured=len(events),
+            entry_ids=entry_ids,
+            flushed=bool(flush_res is not None),
+            flush_result=flush_res,
+        )
+
+    @api.post("/v1/ingest/wearable/health", response_model=ManualIngestResponse)
+    async def ingest_wearable_health(
+        file: UploadFile | None = File(default=None),  # noqa: B008
+        payload: dict[str, Any] | list[dict[str, Any]] | None = None,
+        auto_flush: bool = Query(default=False),
+    ) -> ManualIngestResponse:
+        connector = real_connector_hub.wearable
+        if file is not None:
+            content = await file.read()
+            text = content.decode("utf-8-sig", errors="replace")
+            events = connector.parse_health_export(text)
+        elif payload is not None:
+            events = connector.parse_health_export(payload)
+        else:
+            raise HTTPException(
+                status_code=400, detail="Must provide an export file or JSON payload."
+            )
+        entry_ids = [ingestor.capture_habits_sleep(ev).entry_id for ev in events]
+        flush_res = ingestor.flush_batch() if (auto_flush and entry_ids) else None
+        return ManualIngestResponse(
+            status="ok",
+            domain="habits_sleep",
+            connector=connector.source_name,
+            events_captured=len(events),
+            entry_ids=entry_ids,
+            flushed=bool(flush_res is not None),
+            flush_result=flush_res,
+        )
+
+    @api.post("/v1/ingest/calendar/events", response_model=ManualIngestResponse)
+    def ingest_calendar_events(
+        credentials_path: str = Query(default=""),
+        days: int = Query(default=7, ge=1, le=90),
+        auto_flush: bool = Query(default=False),
+    ) -> ManualIngestResponse:
+        connector = real_connector_hub.calendar
+        events = connector.fetch_events(credentials_path=credentials_path, days=days)
+        entry_ids = [ingestor.capture_time_block(ev).entry_id for ev in events]
+        flush_res = ingestor.flush_batch() if (auto_flush and entry_ids) else None
+        return ManualIngestResponse(
+            status="ok",
+            domain="time_calendar",
+            connector=connector.source_name,
+            events_captured=len(events),
+            entry_ids=entry_ids,
+            flushed=bool(flush_res is not None),
+            flush_result=flush_res,
         )
 
     return api

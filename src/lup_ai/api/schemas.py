@@ -80,12 +80,40 @@ class GoalSchema(BaseModel):
     metric_name: str
     target_value: float
     unit: str
-    comparison_operator: str
+    comparison_operator: str = ">="
     deadline: str | None = None
-    priority: int
-    status: str
+    priority: int = 1
+    status: str = "active"
     latest_week: str | None = None
     latest_observed_value: float | None = None
+
+
+class GoalCreate(BaseModel):
+    """Payload to create a new goal (omits goal_id, created_at, updated_at)."""
+
+    domain: str = Field(..., min_length=1, max_length=32)
+    title: str = Field(..., min_length=1, max_length=160)
+    metric_name: str = Field(..., min_length=1, max_length=64)
+    target_value: float
+    unit: str = Field(..., min_length=1, max_length=32)
+    comparison_operator: str = Field(default=">=", max_length=8)
+    deadline: str | None = None
+    priority: int = Field(default=1, ge=1, le=10)
+    status: str = Field(default="active", max_length=16)
+
+
+class GoalUpdate(BaseModel):
+    """Payload to update an existing goal (all fields optional)."""
+
+    domain: str | None = None
+    title: str | None = None
+    metric_name: str | None = None
+    target_value: float | None = None
+    unit: str | None = None
+    comparison_operator: str | None = None
+    deadline: str | None = None
+    priority: int | None = None
+    status: str | None = None
 
 
 class PreferenceSchema(BaseModel):
@@ -95,7 +123,26 @@ class PreferenceSchema(BaseModel):
     domain: str
     key_name: str
     value_json: str
-    is_hard_constraint: bool
+    is_hard_constraint: bool = False
+
+
+class PreferenceCreate(BaseModel):
+    """Payload to create a new preference or hard constraint."""
+
+    pref_id: str | None = None
+    domain: str = Field(..., min_length=1, max_length=32)
+    key_name: str = Field(..., min_length=1, max_length=64)
+    value_json: str = Field(..., min_length=1)
+    is_hard_constraint: bool = False
+
+
+class PreferenceUpdate(BaseModel):
+    """Payload to update an existing preference (all fields optional)."""
+
+    domain: str | None = None
+    key_name: str | None = None
+    value_json: str | None = None
+    is_hard_constraint: bool | None = None
 
 
 class CatalogQueryResponse(BaseModel):
@@ -186,6 +233,18 @@ class SimulatedSyncRequest(BaseModel):
     sources: list[Literal["finance", "habits_sleep", "time_calendar"]] | None = None
 
 
+class ManualIngestResponse(BaseModel):
+    """Summary of events captured through real source connectors."""
+
+    status: str = "ok"
+    domain: str
+    connector: str
+    events_captured: int
+    entry_ids: list[str] = Field(default_factory=list)
+    flushed: bool = False
+    flush_result: FlushResult | None = None
+
+
 from lup_ai.jobs.scheduler import SchedulerStatus  # noqa: E402
 
 __all__ = [
@@ -199,11 +258,16 @@ __all__ = [
     "DecisionRecord",
     "EvidenceSchema",
     "FlushResult",
+    "GoalCreate",
     "GoalSchema",
+    "GoalUpdate",
     "HealthResponse",
+    "ManualIngestResponse",
     "OutcomesResponse",
     "PendingIngestResponse",
+    "PreferenceCreate",
     "PreferenceSchema",
+    "PreferenceUpdate",
     "ProactiveScanReport",
     "ProactiveScanRequest",
     "SchedulerStatus",

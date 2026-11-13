@@ -16,6 +16,9 @@ from rich.table import Table
 from lup_ai import __version__
 from lup_ai.agent.orchestrator import LupOrchestrator, build_default_repository
 from lup_ai.config.settings import get_settings
+from lup_ai.connectors.real_sources import (
+    CSVBankConnector,
+)
 from lup_ai.connectors.simulated_sources import SimulatedConnectorHub
 from lup_ai.data.batch_ingestor import (
     BatchIngestor,
@@ -558,6 +561,33 @@ def scheduler(
     except KeyboardInterrupt:
         sched.shutdown(wait=False)
         console.print("Scheduler stopped.")
+
+
+@app.command("ingest-bank")
+def ingest_bank(
+    file_path: str = typer.Argument(..., help="Path to bank CSV export file."),
+    auto_flush: bool = typer.Option(
+        False, "--flush", "-f", help="Flush batch to storage immediately."
+    ),
+) -> None:
+    """Ingest movements from a real bank CSV export into the local batch buffer."""
+    settings = get_settings()
+    store = LocalStore(settings.lup_sqlite_path)
+    repo = build_default_repository(settings)
+    ingestor = BatchIngestor(
+        settings=settings,
+        store=store,
+        local_csv_repo=(repo if isinstance(repo, LocalCsvAnalyticsRepository) else None),
+    )
+    connector = CSVBankConnector()
+    events = connector.parse_csv(file_path)
+    captured = [ingestor.capture_finance(ev) for ev in events]
+    console.print(f"Ingested {len(captured)} movements from bank CSV.")
+    if auto_flush and captured:
+        flush_res = ingestor.flush_batch()
+        console.print(
+            f"Batch flushed ({flush_res.target_backend}): {flush_res.flushed_count} events."
+        )
 
 
 @app.command()

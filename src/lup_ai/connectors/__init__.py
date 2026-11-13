@@ -1,5 +1,11 @@
-"""Simulated external source connectors for Finance, Habits/Sleep, and Time/Calendar."""
+"""External source connectors for Finance, Habits/Sleep, and Time/Calendar (simulated and real)."""
 
+from lup_ai.connectors.real_sources import (
+    CSVBankConnector,
+    GoogleCalendarConnector,
+    RealConnectorHub,
+    WearableExportConnector,
+)
 from lup_ai.connectors.simulated_sources import (
     SimulatedBankConnector,
     SimulatedCalendarConnector,
@@ -9,9 +15,13 @@ from lup_ai.connectors.simulated_sources import (
 )
 
 __all__ = [
+    "CSVBankConnector",
+    "GoogleCalendarConnector",
+    "RealConnectorHub",
     "SimulatedBankConnector",
     "SimulatedCalendarConnector",
     "SimulatedConnectorHub",
     "SimulatedSyncReport",
     "SimulatedWearableConnector",
+    "WearableExportConnector",
 ]

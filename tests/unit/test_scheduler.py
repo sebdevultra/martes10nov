@@ -89,4 +89,3 @@ def test_lup_scheduler_registers_jobs_runs_cycle_and_lifespan(tmp_path: Path) ->
         assert body["running"] is True
         assert len(body["jobs"]) == 2
     assert app.state.scheduler.is_running is False
-

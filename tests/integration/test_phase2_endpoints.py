@@ -96,3 +96,95 @@ def test_phase2_ask_routes_simulation_anomalies_and_trends(tmp_path: Path) -> No
     trend_body = trend_ask.json()
     assert trend_body["analysis_type"] == "trends"
     assert trend_body["trends"]["correlations"]
+
+
+def test_goals_and_preferences_crud_endpoints(tmp_path: Path) -> None:
+    client = _setup_test_client(tmp_path)
+
+    # 1. Goals CRUD
+    initial_goals = client.get("/v1/goals").json()
+    len(initial_goals)
+
+    create_resp = client.post(
+        "/v1/goals",
+        json={
+            "domain": "finance",
+            "title": "Ahorro para Emergencias",
+            "metric_name": "emergency_fund",
+            "target_value": 15000000.0,
+            "unit": "COP",
+            "comparison_operator": ">=",
+            "priority": 1,
+            "status": "active",
+        },
+    )
+    assert create_resp.status_code == 201
+    created_goal = create_resp.json()
+    gid = created_goal["goal_id"]
+    assert gid.startswith("goal_finance_")
+    assert created_goal["title"] == "Ahorro para Emergencias"
+    assert created_goal["target_value"] == 15000000.0
+
+    # Get by ID
+    get_resp = client.get(f"/v1/goals/{gid}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["goal_id"] == gid
+
+    # Update goal
+    put_resp = client.put(
+        f"/v1/goals/{gid}",
+        json={"target_value": 20000000.0, "title": "Ahorro Emergencias Ampliado"},
+    )
+    assert put_resp.status_code == 200
+    updated_goal = put_resp.json()
+    assert updated_goal["target_value"] == 20000000.0
+    assert updated_goal["title"] == "Ahorro Emergencias Ampliado"
+
+    # Delete goal
+    del_resp = client.delete(f"/v1/goals/{gid}")
+    assert del_resp.status_code == 204
+
+    # Verify deleted
+    assert client.get(f"/v1/goals/{gid}").status_code == 404
+    assert client.put(f"/v1/goals/{gid}", json={"title": "No existe"}).status_code == 404
+    assert client.delete(f"/v1/goals/{gid}").status_code == 404
+
+    # 2. Preferences CRUD
+    create_p_resp = client.post(
+        "/v1/preferences",
+        json={
+            "domain": "habits_sleep",
+            "key_name": "weekend_sleep_min",
+            "value_json": '{"min_hours": 8.5}',
+            "is_hard_constraint": True,
+        },
+    )
+    assert create_p_resp.status_code == 201
+    created_pref = create_p_resp.json()
+    pid = created_pref["pref_id"]
+    assert pid == "pref_habits_sleep_weekend_sleep_min"
+    assert created_pref["is_hard_constraint"] is True
+
+    # Get by ID
+    get_p_resp = client.get(f"/v1/preferences/{pid}")
+    assert get_p_resp.status_code == 200
+    assert get_p_resp.json()["pref_id"] == pid
+
+    # Update preference
+    put_p_resp = client.put(
+        f"/v1/preferences/{pid}",
+        json={"is_hard_constraint": False, "value_json": '{"min_hours": 9.0}'},
+    )
+    assert put_p_resp.status_code == 200
+    updated_pref = put_p_resp.json()
+    assert updated_pref["is_hard_constraint"] is False
+    assert "9.0" in updated_pref["value_json"]
+
+    # Delete preference
+    del_p_resp = client.delete(f"/v1/preferences/{pid}")
+    assert del_p_resp.status_code == 204
+
+    # Verify deleted
+    assert client.get(f"/v1/preferences/{pid}").status_code == 404
+    assert client.put(f"/v1/preferences/{pid}", json={"key_name": "x"}).status_code == 404
+    assert client.delete(f"/v1/preferences/{pid}").status_code == 404

@@ -59,8 +59,7 @@ def test_gemini_client_falls_back_when_primary_model_remains_unavailable() -> No
             raise _Transient503Error("503 UNAVAILABLE: high demand")
         return SimpleNamespace(
             text=(
-                '{"answer": "Fallback model OK", '
-                '"key_observations": [], "goal_alignment_note": ""}'
+                '{"answer": "Fallback model OK", "key_observations": [], "goal_alignment_note": ""}'
             )
         )
 

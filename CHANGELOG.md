@@ -2,6 +2,20 @@
 
 Todos los cambios relevantes del proyecto **LUP AI** se registran en este archivo usando zona horaria `America/Bogota` (`YYYY-MM-DD HH:mm`).
 
+## [2026-11-13 08:15]
+
+- **[Added]** Se implementó el Objetivo 1 con adaptadores base para fuentes reales (`src/lup_ai/connectors/real_sources.py` con `CSVBankConnector`, `WearableExportConnector`, `GoogleCalendarConnector` y `RealConnectorHub`), respetando los contratos tipados de `BatchIngestor` (`FinanceEventInput`, `HabitsSleepEventInput`, `TimeBlockEventInput`). Se expusieron endpoints FastAPI (`POST /v1/ingest/bank/csv`, `POST /v1/ingest/wearable/health`, `POST /v1/ingest/calendar/events`) y comando CLI `lup ingest-bank`, junto con pruebas en `tests/unit/test_real_connectors.py` e integración en `tests/integration/test_phase4_connectors_and_ui.py`.
+  Motivo: Permitir la ingesta manual de extractos bancarios en CSV, exportaciones de wearables de salud y eventos de calendario directamente hacia el buffer local de batch ingestion.
+
+- **[Added]** Se implementó el Objetivo 2 con CRUD completo de Metas y Preferencias bajo arquitectura FastAPI-First: modelos Pydantic v2 `GoalCreate`, `GoalUpdate`, `PreferenceCreate`, `PreferenceUpdate` en `src/lup_ai/api/schemas.py`, lógica de persistencia con sincronización dual SQLite/Snowflake (`ANALYTICS.DIM_GOALS` y `ANALYTICS.DIM_PREFERENCES`) en `LocalStore` (`src/lup_ai/data/local_store.py`), y endpoints REST en `src/lup_ai/api/main.py` (`POST /v1/goals`, `GET/PUT/DELETE /v1/goals/{id}` y equivalentes para `/v1/preferences`), con pruebas unitarias e integración en `tests/unit/test_local_store.py` y `tests/integration/test_phase2_endpoints.py`.
+  Motivo: Permitir la gestión dinámica de metas y preferencias/restricciones con consistencia garantizada entre el espejo local y el almacén analítico.
+
+- **[Added]** Se implementó el Objetivo 3 agregando `"apscheduler>=3.10.4"` bajo dependencias opcionales `api` en `pyproject.toml`, configurando la fecha ancla dinámica con `date.today()` en `ProactiveScanner` (`src/lup_ai/jobs/proactive_scan.py`) e integrando el context manager `lifespan` en `src/lup_ai/api/main.py` con `BackgroundScheduler` para ejecutar diariamente los escaneos proactivos (02:00) y flush de batches (02:30).
+  Motivo: Automatizar los ciclos de escaneo proactivo y replicación batch mediante el ciclo de vida nativo de FastAPI.
+
+- **[Added]** Se implementó el Objetivo 4 agregando métodos `get_unsynced_decisions`, `get_unsynced_outcomes`, `mark_decisions_as_synced` y `mark_outcomes_as_synced` en `LocalStore` (`src/lup_ai/data/local_store.py`), y conectando `BatchIngestor._flush_to_snowflake` para replicar idempotentemente (`MERGE INTO`) las recomendaciones y outcomes pendientes hacia `ANALYTICS.FCT_DECISIONS_LOG` y `ANALYTICS.FCT_DECISION_OUTCOMES` en Snowflake.
+  Motivo: Garantizar la replicación analítica completa del Decision Outcome Loop hacia las tablas de hechos en Snowflake.
+
 ## [2026-11-12 11:18]
 
 - **[Added]** Se integró `APScheduler` (`APScheduler>=3.10.4,<4.0.0` en `pyproject.toml`, módulo `src/lup_ai/jobs/scheduler.py` con `LupScheduler`, script `lup-scheduler`, comando CLI `lup scheduler`, endpoint `GET /v1/jobs/scheduler`, variables `LUP_SCHEDULER_*` en `Settings`/`.env.example` y ciclo de vida `lifespan` en `FastAPI`) para ejecutar periódicamente `ProactiveScanner.run` y `BatchIngestor.flush_batch`, junto con pruebas en `tests/unit/test_scheduler.py`.

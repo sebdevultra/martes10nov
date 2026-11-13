@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -14,9 +15,16 @@ from typing import Any
 class LocalStore:
     """Manage local SQLite persistence to avoid OLTP load and unnecessary Snowflake wake-ups."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(
+        self,
+        db_path: Path | str,
+        settings: Any | None = None,
+        snowflake_conn_factory: Any | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._settings = settings
+        self._snowflake_conn_factory = snowflake_conn_factory
         self.initialize()
 
     @contextmanager
@@ -171,6 +179,420 @@ class LocalStore:
                 conn.execute("DELETE FROM metric_cache WHERE cache_key = ?", (cache_key,))
                 return None
             return json.loads(row["payload_json"])
+
+    def _open_snowflake_connection(self) -> Any | None:
+        if self._snowflake_conn_factory is not None:
+            return self._snowflake_conn_factory(self._settings)
+        cfg = self._settings
+        if cfg is None:
+            try:
+                from lup_ai.config.settings import get_settings
+
+                cfg = get_settings()
+            except Exception:
+                return None
+        try:
+            from lup_ai.data.snowflake_client import (
+                build_snowflake_connect_kwargs,
+                has_valid_snowflake_credentials,
+            )
+
+            if not has_valid_snowflake_credentials(cfg):
+                return None
+            import snowflake.connector
+
+            conn_kwargs = build_snowflake_connect_kwargs(
+                cfg,
+                role=cfg.snowflake_role_ingest,
+                warehouse=cfg.snowflake_warehouse,
+                database=cfg.snowflake_database,
+                schema="ANALYTICS",
+            )
+            return snowflake.connector.connect(**conn_kwargs)
+        except Exception:
+            return None
+
+    def _sync_goal_to_snowflake(self, goal: dict[str, Any], action: str = "upsert") -> None:
+        conn = self._open_snowflake_connection()
+        if conn is None:
+            return
+        try:
+            with conn.cursor() as cur:
+                if action == "delete":
+                    cur.execute(
+                        "DELETE FROM ANALYTICS.DIM_GOALS WHERE goal_id = %s",
+                        (str(goal["goal_id"]),),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        MERGE INTO ANALYTICS.DIM_GOALS AS tgt
+                        USING (
+                            SELECT
+                                %s AS goal_id,
+                                %s AS domain,
+                                %s AS title,
+                                %s AS metric_name,
+                                %s AS target_value,
+                                %s AS unit,
+                                %s AS comparison_operator,
+                                TO_DATE(%s) AS deadline,
+                                %s AS priority,
+                                %s AS status
+                        ) AS src
+                        ON tgt.goal_id = src.goal_id
+                        WHEN MATCHED THEN UPDATE SET
+                            tgt.domain = src.domain,
+                            tgt.title = src.title,
+                            tgt.metric_name = src.metric_name,
+                            tgt.target_value = src.target_value,
+                            tgt.unit = src.unit,
+                            tgt.comparison_operator = src.comparison_operator,
+                            tgt.deadline = src.deadline,
+                            tgt.priority = src.priority,
+                            tgt.status = src.status,
+                            tgt.updated_at = CURRENT_TIMESTAMP()
+                        WHEN NOT MATCHED THEN INSERT (
+                            goal_id, domain, title, metric_name, target_value,
+                            unit, comparison_operator, deadline, priority, status
+                        ) VALUES (
+                            src.goal_id, src.domain, src.title, src.metric_name,
+                            src.target_value, src.unit, src.comparison_operator,
+                            src.deadline, src.priority, src.status
+                        )
+                        """,
+                        (
+                            str(goal["goal_id"]),
+                            str(goal["domain"]),
+                            str(goal["title"]),
+                            str(goal["metric_name"]),
+                            float(goal["target_value"]),
+                            str(goal["unit"]),
+                            str(goal.get("comparison_operator") or ">="),
+                            str(goal["deadline"])[:10] if goal.get("deadline") else None,
+                            int(goal.get("priority", 1)),
+                            str(goal.get("status", "active")),
+                        ),
+                    )
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _sync_preference_to_snowflake(self, pref: dict[str, Any], action: str = "upsert") -> None:
+        conn = self._open_snowflake_connection()
+        if conn is None:
+            return
+        try:
+            with conn.cursor() as cur:
+                if action == "delete":
+                    cur.execute(
+                        "DELETE FROM ANALYTICS.DIM_PREFERENCES WHERE pref_id = %s",
+                        (str(pref["pref_id"]),),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        MERGE INTO ANALYTICS.DIM_PREFERENCES AS tgt
+                        USING (
+                            SELECT
+                                %s AS pref_id,
+                                %s AS domain,
+                                %s AS key_name,
+                                %s AS value_json,
+                                %s AS is_hard_constraint
+                        ) AS src
+                        ON tgt.pref_id = src.pref_id
+                        WHEN MATCHED THEN UPDATE SET
+                            tgt.domain = src.domain,
+                            tgt.key_name = src.key_name,
+                            tgt.value_json = src.value_json,
+                            tgt.is_hard_constraint = src.is_hard_constraint,
+                            tgt.updated_at = CURRENT_TIMESTAMP()
+                        WHEN NOT MATCHED THEN INSERT (
+                            pref_id, domain, key_name, value_json, is_hard_constraint
+                        ) VALUES (
+                            src.pref_id, src.domain, src.key_name,
+                            src.value_json, src.is_hard_constraint
+                        )
+                        """,
+                        (
+                            str(pref["pref_id"]),
+                            str(pref["domain"]),
+                            str(pref["key_name"]),
+                            str(pref["value_json"]),
+                            bool(pref.get("is_hard_constraint", False)),
+                        ),
+                    )
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def create_goal(self, goal_data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new goal in the SQLite mirror and sync to Snowflake."""
+        now_iso = self._utc_now().isoformat()
+        domain = str(goal_data["domain"])
+        goal_id = goal_data.get("goal_id")
+        if not goal_id:
+            domain_slug = domain.lower().replace(" ", "_")
+            goal_id = f"goal_{domain_slug}_{uuid.uuid4().hex[:8]}"
+
+        record = {
+            "goal_id": str(goal_id),
+            "domain": domain,
+            "title": str(goal_data["title"]),
+            "metric_name": str(goal_data["metric_name"]),
+            "target_value": float(goal_data["target_value"]),
+            "unit": str(goal_data["unit"]),
+            "comparison_operator": str(goal_data.get("comparison_operator") or ">="),
+            "deadline": str(goal_data["deadline"]) if goal_data.get("deadline") else None,
+            "priority": int(goal_data.get("priority", 1)),
+            "status": str(goal_data.get("status", "active")),
+            "updated_at": now_iso,
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO goals_mirror (
+                    goal_id, domain, title, metric_name, target_value,
+                    unit, comparison_operator, deadline, priority, status, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(goal_id) DO UPDATE SET
+                    domain = excluded.domain,
+                    title = excluded.title,
+                    metric_name = excluded.metric_name,
+                    target_value = excluded.target_value,
+                    unit = excluded.unit,
+                    comparison_operator = excluded.comparison_operator,
+                    deadline = excluded.deadline,
+                    priority = excluded.priority,
+                    status = excluded.status,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    record["goal_id"],
+                    record["domain"],
+                    record["title"],
+                    record["metric_name"],
+                    record["target_value"],
+                    record["unit"],
+                    record["comparison_operator"],
+                    record["deadline"],
+                    record["priority"],
+                    record["status"],
+                    record["updated_at"],
+                ),
+            )
+        self._sync_goal_to_snowflake(record, action="upsert")
+        self.clear_cache()
+        return self.get_goal(record["goal_id"]) or record
+
+    def get_goal(self, goal_id: str) -> dict[str, Any] | None:
+        """Fetch a single goal from the local mirror."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT goal_id, domain, title, metric_name, target_value,
+                       unit, comparison_operator, deadline, priority, status, updated_at
+                FROM goals_mirror
+                WHERE goal_id = ?
+                """,
+                (goal_id,),
+            ).fetchone()
+            return dict(row) if row is not None else None
+
+    def update_goal(self, goal_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        """Update an existing goal in the SQLite mirror and sync to Snowflake."""
+        current = self.get_goal(goal_id)
+        if current is None:
+            return None
+
+        allowed_fields = {
+            "domain",
+            "title",
+            "metric_name",
+            "target_value",
+            "unit",
+            "comparison_operator",
+            "deadline",
+            "priority",
+            "status",
+        }
+        filtered = {k: v for k, v in updates.items() if k in allowed_fields and v is not None}
+        if not filtered:
+            return current
+
+        now_iso = self._utc_now().isoformat()
+        merged = {**current, **filtered, "updated_at": now_iso}
+        if "target_value" in merged:
+            merged["target_value"] = float(merged["target_value"])
+        if "priority" in merged:
+            merged["priority"] = int(merged["priority"])
+
+        set_clauses = [f"{k} = ?" for k in filtered.keys()]
+        set_clauses.append("updated_at = ?")
+        values = [merged[k] for k in filtered.keys()]
+        values.append(now_iso)
+        values.append(goal_id)
+
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE goals_mirror SET {', '.join(set_clauses)} WHERE goal_id = ?",
+                values,
+            )
+
+        self._sync_goal_to_snowflake(merged, action="upsert")
+        self.clear_cache()
+        return self.get_goal(goal_id)
+
+    def delete_goal(self, goal_id: str) -> bool:
+        """Delete a goal from the SQLite mirror and sync to Snowflake."""
+        current = self.get_goal(goal_id)
+        if current is None:
+            return False
+
+        with self._connect() as conn:
+            conn.execute("DELETE FROM goals_mirror WHERE goal_id = ?", (goal_id,))
+
+        self._sync_goal_to_snowflake(current, action="delete")
+        self.clear_cache()
+        return True
+
+    def create_preference(self, pref_data: dict[str, Any]) -> dict[str, Any]:
+        """Create a new preference in the SQLite mirror and sync to Snowflake."""
+        now_iso = self._utc_now().isoformat()
+        domain = str(pref_data["domain"])
+        key_name = str(pref_data["key_name"])
+        pref_id = pref_data.get("pref_id")
+        if not pref_id:
+            domain_slug = domain.lower().replace(" ", "_")
+            key_slug = key_name.lower().replace(" ", "_")
+            pref_id = f"pref_{domain_slug}_{key_slug}"
+
+        value_json = pref_data.get("value_json", "{}")
+        if isinstance(value_json, (dict, list)):
+            value_json = json.dumps(value_json)
+        else:
+            value_json = str(value_json)
+
+        is_hard = bool(pref_data.get("is_hard_constraint", False))
+
+        record = {
+            "pref_id": str(pref_id),
+            "domain": domain,
+            "key_name": key_name,
+            "value_json": value_json,
+            "is_hard_constraint": is_hard,
+            "updated_at": now_iso,
+        }
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO preferences_mirror (
+                    pref_id, domain, key_name, value_json, is_hard_constraint, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pref_id) DO UPDATE SET
+                    domain = excluded.domain,
+                    key_name = excluded.key_name,
+                    value_json = excluded.value_json,
+                    is_hard_constraint = excluded.is_hard_constraint,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    record["pref_id"],
+                    record["domain"],
+                    record["key_name"],
+                    record["value_json"],
+                    1 if is_hard else 0,
+                    record["updated_at"],
+                ),
+            )
+
+        self._sync_preference_to_snowflake(record, action="upsert")
+        self.clear_cache()
+        return self.get_preference(record["pref_id"]) or record
+
+    def get_preference(self, pref_id: str) -> dict[str, Any] | None:
+        """Fetch a single preference from the local mirror."""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT pref_id, domain, key_name, value_json, is_hard_constraint, updated_at
+                FROM preferences_mirror
+                WHERE pref_id = ?
+                """,
+                (pref_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            res = dict(row)
+            res["is_hard_constraint"] = bool(res["is_hard_constraint"])
+            return res
+
+    def update_preference(self, pref_id: str, updates: dict[str, Any]) -> dict[str, Any] | None:
+        """Update an existing preference in the SQLite mirror and sync to Snowflake."""
+        current = self.get_preference(pref_id)
+        if current is None:
+            return None
+
+        allowed_fields = {"domain", "key_name", "value_json", "is_hard_constraint"}
+        filtered = {k: v for k, v in updates.items() if k in allowed_fields and v is not None}
+        if not filtered:
+            return current
+
+        now_iso = self._utc_now().isoformat()
+        merged = {**current, **filtered, "updated_at": now_iso}
+        if "value_json" in filtered:
+            val = filtered["value_json"]
+            merged["value_json"] = json.dumps(val) if isinstance(val, (dict, list)) else str(val)
+        if "is_hard_constraint" in filtered:
+            merged["is_hard_constraint"] = bool(filtered["is_hard_constraint"])
+
+        set_clauses = [f"{k} = ?" for k in filtered.keys()]
+        set_clauses.append("updated_at = ?")
+        values = []
+        for k in filtered.keys():
+            if k == "is_hard_constraint":
+                values.append(1 if merged[k] else 0)
+            elif k == "value_json":
+                values.append(merged["value_json"])
+            else:
+                values.append(merged[k])
+        values.append(now_iso)
+        values.append(pref_id)
+
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE preferences_mirror SET {', '.join(set_clauses)} WHERE pref_id = ?",
+                values,
+            )
+
+        self._sync_preference_to_snowflake(merged, action="upsert")
+        self.clear_cache()
+        return self.get_preference(pref_id)
+
+    def delete_preference(self, pref_id: str) -> bool:
+        """Delete a preference from the SQLite mirror and sync to Snowflake."""
+        current = self.get_preference(pref_id)
+        if current is None:
+            return False
+
+        with self._connect() as conn:
+            conn.execute("DELETE FROM preferences_mirror WHERE pref_id = ?", (pref_id,))
+
+        self._sync_preference_to_snowflake(current, action="delete")
+        self.clear_cache()
+        return True
 
     def upsert_goal(self, goal: dict[str, Any]) -> None:
         """Insert or update a goal in the local mirror."""
@@ -603,38 +1025,50 @@ class LocalStore:
             )
             return int(cur.rowcount)
 
-    def list_unsynced_decisions(self, limit: int = 200) -> list[dict[str, Any]]:
-        """List local decisions not yet replicated to Snowflake ANALYTICS.FCT_DECISIONS_LOG."""
+    def get_unsynced_decisions(self) -> list[dict[str, Any]]:
+        """Fetch local decisions where synced_to_snowflake = 0."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM decisions_log
                 WHERE synced_to_snowflake = 0
                 ORDER BY created_at ASC
-                LIMIT ?
-                """,
-                (limit,),
+                """
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def mark_decisions_synced(self, decision_ids: list[str]) -> int:
-        """Mark decisions_log rows as replicated to Snowflake."""
-        return self._mark_table_synced_to_snowflake("decisions_log", "decision_id", decision_ids)
+    def list_unsynced_decisions(self, limit: int = 200) -> list[dict[str, Any]]:
+        """List local decisions not yet replicated to Snowflake ANALYTICS.FCT_DECISIONS_LOG."""
+        return self.get_unsynced_decisions()[:limit]
 
-    def list_unsynced_outcomes(self, limit: int = 200) -> list[dict[str, Any]]:
-        """List local outcomes not yet replicated to ANALYTICS.FCT_DECISION_OUTCOMES."""
+    def mark_decisions_as_synced(self, ids: list[str]) -> int:
+        """Mark decisions_log rows as replicated to Snowflake (synced_to_snowflake = 1)."""
+        return self._mark_table_synced_to_snowflake("decisions_log", "decision_id", ids)
+
+    def mark_decisions_synced(self, decision_ids: list[str]) -> int:
+        """Alias for backward compatibility."""
+        return self.mark_decisions_as_synced(decision_ids)
+
+    def get_unsynced_outcomes(self) -> list[dict[str, Any]]:
+        """Fetch local decision outcomes where synced_to_snowflake = 0."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM decision_outcomes
                 WHERE synced_to_snowflake = 0
                 ORDER BY evaluated_at ASC
-                LIMIT ?
-                """,
-                (limit,),
+                """
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def list_unsynced_outcomes(self, limit: int = 200) -> list[dict[str, Any]]:
+        """List local outcomes not yet replicated to ANALYTICS.FCT_DECISION_OUTCOMES."""
+        return self.get_unsynced_outcomes()[:limit]
+
+    def mark_outcomes_as_synced(self, ids: list[str]) -> int:
+        """Mark decision_outcomes rows as replicated to Snowflake (synced_to_snowflake = 1)."""
+        return self._mark_table_synced_to_snowflake("decision_outcomes", "outcome_id", ids)
+
     def mark_outcomes_synced(self, outcome_ids: list[str]) -> int:
-        """Mark decision_outcomes rows as replicated to Snowflake."""
-        return self._mark_table_synced_to_snowflake("decision_outcomes", "outcome_id", outcome_ids)
+        """Alias for backward compatibility."""
+        return self.mark_outcomes_as_synced(outcome_ids)

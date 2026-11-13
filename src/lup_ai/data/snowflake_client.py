@@ -130,10 +130,7 @@ class SnowflakeAnalyticsRepository:
                 cursor.execute(safe_sql, params or ())
                 columns = [col[0].lower() for col in cursor.description]
                 return [
-                    {
-                        col: self._normalize_cell(val)
-                        for col, val in zip(columns, row, strict=False)
-                    }
+                    {col: self._normalize_cell(val) for col, val in zip(columns, row, strict=False)}
                     for row in cursor.fetchall()
                 ]
         finally:

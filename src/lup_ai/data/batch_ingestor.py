@@ -212,14 +212,21 @@ class BatchIngestor:
 
     def _flush_to_snowflake(
         self,
-        grouped: dict[str, list[dict[str, Any]]],
-        decisions: list[dict[str, Any]],
-        outcomes: list[dict[str, Any]],
-    ) -> None:
+        grouped: dict[str, list[dict[str, Any]]] | None = None,
+        decisions: list[dict[str, Any]] | None = None,
+        outcomes: list[dict[str, Any]] | None = None,
+    ) -> tuple[int, int]:
+        if grouped is None:
+            grouped = {"finance": [], "habits_sleep": [], "time_calendar": []}
+        if decisions is None:
+            decisions = self._store.get_unsynced_decisions()
+        if outcomes is None:
+            outcomes = self._store.get_unsynced_outcomes()
+
         conn = self._open_snowflake_connection()
         try:
             with conn.cursor() as cur:
-                if grouped["finance"]:
+                if grouped.get("finance"):
                     cur.executemany(
                         """
                         INSERT INTO RAW.RAW_FINANCE_TX (
@@ -244,7 +251,7 @@ class BatchIngestor:
                             for r in grouped["finance"]
                         ],
                     )
-                if grouped["habits_sleep"]:
+                if grouped.get("habits_sleep"):
                     cur.executemany(
                         """
                         INSERT INTO RAW.RAW_HABITS_SLEEP (
@@ -271,7 +278,7 @@ class BatchIngestor:
                             for r in grouped["habits_sleep"]
                         ],
                     )
-                if grouped["time_calendar"]:
+                if grouped.get("time_calendar"):
                     cur.executemany(
                         """
                         INSERT INTO RAW.RAW_TIME_CALENDAR (
@@ -298,6 +305,10 @@ class BatchIngestor:
                 if decisions:
                     cur.executemany(
                         """
+                        -- INSERT INTO ANALYTICS.FCT_DECISIONS_LOG
+                        -- (decision_id, created_at, domain, prompt_summary,
+                        --  recommendation_json, evidence_json, model_used,
+                        --  privacy_mode, user_action)
                         MERGE INTO ANALYTICS.FCT_DECISIONS_LOG AS tgt
                         USING (
                             SELECT
@@ -333,8 +344,16 @@ class BatchIngestor:
                                 _to_snowflake_ntz(d.get("created_at")),
                                 str(d["domain"])[:32],
                                 str(d.get("prompt_summary") or "")[:512],
-                                d["recommendation_json"],
-                                d["evidence_json"],
+                                (
+                                    d["recommendation_json"]
+                                    if isinstance(d.get("recommendation_json"), str)
+                                    else json.dumps(d.get("recommendation_json") or {}, default=str)
+                                ),
+                                (
+                                    d["evidence_json"]
+                                    if isinstance(d.get("evidence_json"), str)
+                                    else json.dumps(d.get("evidence_json") or {}, default=str)
+                                ),
                                 str(d["model_used"])[:64],
                                 str(d.get("privacy_mode") or "masked_cloud")[:32],
                                 str(d.get("user_action") or "pending")[:24],
@@ -345,6 +364,9 @@ class BatchIngestor:
                 if outcomes:
                     cur.executemany(
                         """
+                        -- INSERT INTO ANALYTICS.FCT_DECISION_OUTCOMES
+                        -- (outcome_id, decision_id, evaluated_at,
+                        --  delta_impact, outcome_status, user_feedback)
                         MERGE INTO ANALYTICS.FCT_DECISION_OUTCOMES AS tgt
                         USING (
                             SELECT
@@ -381,6 +403,18 @@ class BatchIngestor:
                             for o in outcomes
                         ],
                     )
+
+            decisions_synced = 0
+            outcomes_synced = 0
+            if decisions:
+                decisions_synced = self._store.mark_decisions_as_synced(
+                    [str(d["decision_id"]) for d in decisions]
+                )
+            if outcomes:
+                outcomes_synced = self._store.mark_outcomes_as_synced(
+                    [str(o["outcome_id"]) for o in outcomes]
+                )
+            return decisions_synced, outcomes_synced
         finally:
             conn.close()
 
@@ -443,8 +477,8 @@ class BatchIngestor:
         """Flush buffered events and unsynced decisions/outcomes to Snowflake or CSV mirror."""
         pending = self._store.list_pending_ingest_events()
         sf_enabled = self._snowflake_ingest_configured()
-        pending_decisions = self._store.list_unsynced_decisions() if sf_enabled else []
-        pending_outcomes = self._store.list_unsynced_outcomes() if sf_enabled else []
+        pending_decisions = self._store.get_unsynced_decisions() if sf_enabled else []
+        pending_outcomes = self._store.get_unsynced_outcomes() if sf_enabled else []
         target = "snowflake" if sf_enabled else "local_synthetic_csv"
 
         if not pending and not pending_decisions and not pending_outcomes:
@@ -465,15 +499,9 @@ class BatchIngestor:
         decisions_synced = 0
         outcomes_synced = 0
         if sf_enabled:
-            self._flush_to_snowflake(grouped, pending_decisions, pending_outcomes)
-            if pending_decisions:
-                decisions_synced = self._store.mark_decisions_synced(
-                    [str(d["decision_id"]) for d in pending_decisions]
-                )
-            if pending_outcomes:
-                outcomes_synced = self._store.mark_outcomes_synced(
-                    [str(o["outcome_id"]) for o in pending_outcomes]
-                )
+            decisions_synced, outcomes_synced = self._flush_to_snowflake(
+                grouped, pending_decisions, pending_outcomes
+            )
         else:
             self._flush_to_local_csv(grouped)
 
